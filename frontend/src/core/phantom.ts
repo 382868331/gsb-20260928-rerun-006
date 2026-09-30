@@ -99,18 +99,29 @@ export function volumeToFrames(volume: Volume, reversed = false): ImageFrame[] {
   return frames;
 }
 
-export type FaultMode = 'none' | 'missing' | 'conflict';
+export type FaultMode = 'none' | 'missing' | 'conflict' | 'opposite' | 'shuffled' | 'duplicate' | 'mixed';
 
 // 生成可能带故障的帧序列，用于验证组卷校验
 export function buildFaultyFrames(
   def: PhantomDef,
   mode: FaultMode,
-): { frames: ImageFrame[]; missingK?: number; conflictK?: number } {
+): {
+  frames: ImageFrame[];
+  missingK?: number;
+  conflictK?: number;
+  oppositeK?: number;
+  duplicateK?: number;
+  shuffleMap?: number[];
+  sourceName: string;
+} {
   const volume = createAnalyticVolume(def);
   const reversed = true; // 默认即翻转层序
   let frames = volumeToFrames(volume, reversed);
   let missingK: number | undefined;
   let conflictK: number | undefined;
+  let oppositeK: number | undefined;
+  let duplicateK: number | undefined;
+  let shuffleMap: number[] | undefined;
   if (mode === 'missing') {
     missingK = Math.floor(def.dimensions[2] / 2);
     // reversed 输出中体素 k 位于索引 nz-1-k
@@ -128,8 +139,65 @@ export function buildFaultyFrames(
         [1, 0, 0],
       ],
     };
+  } else if (mode === 'opposite') {
+    // 单帧方向相反：列/行余弦全部取反（面内旋转180°），位置仍是同一平行层
+    oppositeK = 4;
+    const idx = def.dimensions[2] - 1 - oppositeK;
+    const f = frames[idx];
+    const [c, r] = f.imageOrientationPatient;
+    frames[idx] = {
+      ...f,
+      imageOrientationPatient: [
+        [-c[0], -c[1], -c[2]],
+        [-r[0], -r[1], -r[2]],
+      ],
+    };
+  } else if (mode === 'shuffled') {
+    // 合法数据但输入顺序打乱：重排后必须得到相同体数据与测量
+    shuffleMap = [...frames.keys()];
+    for (let i = shuffleMap.length - 1; i > 0; i -= 1) {
+      const j = (i * 7 + 3) % (i + 1);
+      [shuffleMap[i], shuffleMap[j]] = [shuffleMap[j], shuffleMap[i]];
+    }
+    frames = shuffleMap.map((src) => frames[src]);
+  } else if (mode === 'duplicate') {
+    // 两个输入帧落到同一空间位置（重复上传同一切片）
+    duplicateK = 5;
+    const idx = def.dimensions[2] - 1 - duplicateK;
+    frames.splice(idx + 1, 0, frames[idx]);
+  } else if (mode === 'mixed') {
+    // 同一批里混有乱序、缺片和单帧方向相反，要求分别说明
+    missingK = 9;
+    oppositeK = 6;
+    const dropIndex = def.dimensions[2] - 1 - missingK;
+    frames = frames.filter((_, idx) => idx !== dropIndex);
+    const oppIdx = def.dimensions[2] - 1 - oppositeK;
+    const f = frames[Math.min(oppIdx, frames.length - 1)];
+    const [c, r] = f.imageOrientationPatient;
+    frames[Math.min(oppIdx, frames.length - 1)] = {
+      ...f,
+      imageOrientationPatient: [
+        [-c[0], -c[1], -c[2]],
+        [-r[0], -r[1], -r[2]],
+      ],
+    };
+    shuffleMap = [...frames.keys()];
+    for (let i = shuffleMap.length - 1; i > 0; i -= 1) {
+      const j = (i * 7 + 3) % (i + 1);
+      [shuffleMap[i], shuffleMap[j]] = [shuffleMap[j], shuffleMap[i]];
+    }
+    frames = shuffleMap.map((src) => frames[src]);
   }
-  return { frames, missingK, conflictK };
+  const nameMap: Record<FaultMode, string> = {
+    none: '完整翻转层序序列',
+    missing: '缺片序列',
+    conflict: '方向冲突序列',
+    opposite: '单帧反向序列',
+    shuffled: '乱序序列',
+    duplicate: '重复位置序列',
+    mixed: '乱序+缺片+反向混合序列',
+  };
+  return { frames, missingK, conflictK, oppositeK, duplicateK, shuffleMap, sourceName: nameMap[mode] };
 }
 
 // 通过完整帧管线重建合法体数据（覆盖翻转层序排序路径）

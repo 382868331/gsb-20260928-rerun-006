@@ -7,7 +7,7 @@ describe('应用集成', () => {
   beforeEach(() => {
     localStorage.clear();
     useStore.setState({
-      doc: { version: 1, sessions: {}, lastDatasetId: null },
+      doc: { version: 2, sessions: {}, lastDatasetId: null, lastFrameImport: null },
       volume: null,
       loadError: null,
       slices: [0, 0, 0],
@@ -32,9 +32,16 @@ describe('应用集成', () => {
     act(() => {
       fireEvent.click(screen.getByText('载入缺片序列'));
     });
-    expect(screen.getAllByText(/无法组成完整体数据/).length).toBeGreaterThan(0);
+    // 先进入空间排列预览；缺片在预览内给出具体冲突，确认按钮禁用
+    expect(screen.getAllByText(/导入前空间排列预览/).length).toBeGreaterThan(0);
+    expect((screen.getByText(/确认导入并替换当前数据/) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getAllByText(/缺片/).length).toBeGreaterThan(0);
     // 原视图仍在（未被错误影像覆盖）
+    expect(screen.getByText('冠状 Coronal')).toBeTruthy();
+    act(() => {
+      fireEvent.click(screen.getByText(/关闭（保留当前数据）/));
+    });
+    expect(screen.queryByText(/导入前空间排列预览/)).toBeNull();
     expect(screen.getByText('冠状 Coronal')).toBeTruthy();
   });
 });

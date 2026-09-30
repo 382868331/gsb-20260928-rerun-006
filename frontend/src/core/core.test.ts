@@ -7,6 +7,7 @@ import {
   directionLabel,
 } from './geometry';
 import { buildVolumeFromFrames } from './series';
+import { analyzeFrames } from './series';
 import { VolumeBuildError } from './types';
 import {
   PHANTOM_CATALOG,
@@ -14,6 +15,7 @@ import {
   buildPhantomFromFrames,
   createAnalyticVolume,
   phantomId,
+  volumeToFrames,
 } from './phantom';
 import { extractSlice, planeToWorld } from './slices';
 
@@ -115,6 +117,43 @@ describe('帧序列组卷', () => {
       expect(e).toBeInstanceOf(VolumeBuildError);
       expect((e as VolumeBuildError).reasons.join(' ')).toContain('方向');
     }
+  });
+
+  it('单帧方向相反（点积≈-1）被拒绝，不再被静默当成同向', () => {
+    const { frames } = buildFaultyFrames(def, 'opposite');
+    const layout = analyzeFrames(frames);
+    expect(layout.issues.some((i) => i.kind === 'orientation-opposite')).toBe(true);
+    expect(() => buildVolumeFromFrames(frames, def.label, { center: 120, width: 240 })).toThrow(VolumeBuildError);
+  });
+
+  it('整批翻转层序是合法的整体翻转（信息提示），单帧相反才是错误', () => {
+    const volume = createAnalyticVolume(def);
+    const frames = volumeToFrames(volume, true);
+    const layout = analyzeFrames(frames);
+    expect(layout.judgment.fullStackFlipped).toBe(true);
+    expect(layout.issues.every((i) => i.severity !== 'error')).toBe(true);
+  });
+
+  it('乱序合法数据重排后几何与正常顺序完全一致', () => {
+    const volume = createAnalyticVolume(def);
+    const ordered = volumeToFrames(volume, false);
+    const { frames } = buildFaultyFrames(def, 'shuffled');
+    const a = buildVolumeFromFrames(ordered, 'o', volume.window);
+    const b = buildVolumeFromFrames(frames, 'o', volume.window);
+    expect(b.origin).toEqual(a.origin);
+    expect(b.spacing).toEqual(a.spacing);
+    expect(Array.from(b.direction)).toEqual(Array.from(a.direction));
+    expect(Array.from(b.data)).toEqual(Array.from(a.data));
+    expect(analyzeFrames(frames).judgment.inputOrdering).toBe('shuffled');
+  });
+
+  it('混合批次分别报告乱序、缺片与单帧反向', () => {
+    const { frames } = buildFaultyFrames(def, 'mixed');
+    const layout = analyzeFrames(frames);
+    const kinds = new Set(layout.issues.map((i) => i.kind));
+    expect(kinds.has('gap')).toBe(true);
+    expect(kinds.has('orientation-opposite')).toBe(true);
+    expect(layout.judgment.inputOrdering).toBe('shuffled');
   });
 
   it('空序列与单帧均被拒绝', () => {

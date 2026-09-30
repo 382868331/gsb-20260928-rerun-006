@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
+import { ImportPreview } from './components/ImportPreview';
 import { SLICE_PLANES } from './core/slices';
 import { PHANTOM_CATALOG, buildFaultyFrames } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
@@ -13,7 +14,7 @@ export default function App() {
   const draftPoint = useStore((s) => s.draftPoint);
   const loadError = useStore((s) => s.loadError);
   const openPhantom = useStore((s) => s.openPhantom);
-  const openFrames = useStore((s) => s.openFrames);
+  const previewFrames = useStore((s) => s.previewFrames);
   const toggleMeasureMode = useStore((s) => s.toggleMeasureMode);
   const cancelDraft = useStore((s) => s.cancelDraft);
   const removeMeasurement = useStore((s) => s.removeMeasurement);
@@ -25,9 +26,9 @@ export default function App() {
 
   const def = PHANTOM_CATALOG[0];
 
-  const tryFaulty = (mode: 'missing' | 'conflict') => {
-    const { frames } = buildFaultyFrames(def, mode);
-    openFrames(frames, `${def.label}（${mode === 'missing' ? '缺片' : '方向冲突'}）`, { center: 120, width: 240 });
+  const tryFaulty = (mode: 'missing' | 'conflict' | 'opposite' | 'shuffled' | 'duplicate' | 'mixed') => {
+    const { frames, sourceName } = buildFaultyFrames(def, mode);
+    previewFrames(frames, sourceName, `${def.label}（${sourceName}）`, { center: 120, width: 240 });
   };
 
   const markerWorld = volume
@@ -49,6 +50,12 @@ export default function App() {
           </button>
           <button className="danger" onClick={() => tryFaulty('conflict')}>
             载入方向冲突序列
+          </button>
+          <button onClick={() => tryFaulty('shuffled')}>载入乱序序列</button>
+          <button className="danger" onClick={() => tryFaulty('opposite')}>载入单帧反向序列</button>
+          <button className="danger" onClick={() => tryFaulty('duplicate')}>载入重复位置序列</button>
+          <button className="danger" onClick={() => tryFaulty('mixed')}>
+            载入乱序+缺片+反向混合
           </button>
           <button
             className={measureMode ? 'active' : ''}
@@ -72,6 +79,8 @@ export default function App() {
         </div>
       )}
 
+      <ImportPreview />
+
       {!volume ? (
         <div className="empty-state">
           <p>尚未打开体数据。点击上方“打开”加载带空腔、翻转层序、不等间距的人工影像。</p>
@@ -91,6 +100,26 @@ export default function App() {
           </section>
           <aside className="side-panel">
             <h2>{volume.label}</h2>
+            {volume.importInfo && (
+              <div className="import-meta">
+                <dl className="meta">
+                  <dt>原始来源</dt>
+                  <dd>{volume.importInfo.sourceName}</dd>
+                  <dt>导入判断</dt>
+                  <dd>
+                    {volume.importInfo.judgment.inputOrdering === 'ascending'
+                      ? '顺序一致、直接组卷'
+                      : volume.importInfo.judgment.fullStackFlipped
+                        ? '整批反向层序（合法翻转），按空间顺序组卷'
+                        : '乱序输入，已按空间位置重排'}
+                  </dd>
+                  <dt>层间距 / 切片轴</dt>
+                  <dd className="mono">
+                    {volume.importInfo.judgment.layerSpacingMm?.toFixed(2)} mm · {volume.importInfo.judgment.layerAxisLabel}
+                  </dd>
+                </dl>
+              </div>
+            )}
             <dl className="meta">
               <dt>体素数</dt>
               <dd>{volume.dimensions.join(' × ')}</dd>

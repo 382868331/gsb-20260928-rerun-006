@@ -28,6 +28,39 @@ export interface Volume {
   origin: Vec3; // 体素 (0,0,0) 中心的患者坐标
   data: Float32Array; // index = i + j*nx + k*nx*ny
   window: { center: number; width: number };
+  // 帧序列导入时记录的来源与导入判断；内置体模直接打开时为空
+  importInfo?: ImportInfo;
+}
+
+// 一帧在空间排列中的方向归类
+// consistent：与参考帧同向；opposite：列/行均反向（面内旋转180°）；
+// mirror-col/mirror-row：仅一个方向反向（镜像）；inconsistent：非共栅格方向
+export type OrientationKind =
+  | 'consistent'
+  | 'opposite'
+  | 'mirror-col'
+  | 'mirror-row'
+  | 'inconsistent';
+
+// 导入前对一批切片做出的空间排列判断，随数据一起持久化（“保存重开保留导入判断”）
+export interface ImportJudgment {
+  frameCount: number;
+  layerSpacingMm: number | null;
+  // 输入（文件）顺序沿切片轴是递增、递减（整体翻转层序）还是乱序
+  inputOrdering: 'ascending' | 'descending' | 'shuffled';
+  // 是否发生了重排：输入序号 -> 空间层号
+  orderMap: number[];
+  reordered: boolean;
+  // 整批层序方向与首帧法线相反（合法的整体翻转，区别于单帧方向翻转）
+  fullStackFlipped: boolean;
+  layerAxisLabel: string;
+  planeLabels: [string, string];
+}
+
+export interface ImportInfo {
+  sourceName: string;
+  importedAt: number;
+  judgment: ImportJudgment;
 }
 
 export interface Measurement {
