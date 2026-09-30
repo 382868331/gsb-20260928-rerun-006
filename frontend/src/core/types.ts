@@ -16,6 +16,8 @@ export interface ImageFrame {
   // [沿列递增方向, 沿行递增方向] 的单位方向余弦
   imageOrientationPatient: readonly [Vec3, Vec3];
   pixelData: ArrayLike<number>;
+  // 原始来源标识（文件名/SOP 实例号），用于导入预览与重开后追溯
+  sourceName?: string;
 }
 
 export interface Volume {
@@ -28,6 +30,25 @@ export interface Volume {
   origin: Vec3; // 体素 (0,0,0) 中心的患者坐标
   data: Float32Array; // index = i + j*nx + k*nx*ny
   window: { center: number; width: number };
+  // 导入判定（仅外部帧序列组卷时存在）
+  importInfo?: ImportInfo;
+}
+
+// 一次帧序列导入的空间排列判定与原始来源
+export interface ImportInfo {
+  // 原始文件/帧的来源顺序索引 -> 排序后体数据层号 k 的映射
+  sourceOrder: number[];
+  frameCount: number;
+  // 原始帧提供顺序沿切片轴的走向，如头侧→足侧
+  sourceDirectionLabel: string;
+  // 排序后体数据 k 轴递增方向的解剖方位
+  layerDirectionLabel: string;
+  // 提供顺序是否与空间顺序相反（整批层序翻转，属合法重排，不是错误）
+  reversedOrder: boolean;
+  // 提供顺序中是否存在乱序帧（位置前后错位，已按位置重排）
+  shuffled: boolean;
+  // 原始来源文件名/标识（按提供顺序）
+  sourceNames: string[];
 }
 
 export interface Measurement {

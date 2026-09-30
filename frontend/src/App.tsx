@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
+import { ImportPreview } from './components/ImportPreview';
 import { SLICE_PLANES } from './core/slices';
 import { PHANTOM_CATALOG, buildFaultyFrames } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
@@ -13,7 +14,7 @@ export default function App() {
   const draftPoint = useStore((s) => s.draftPoint);
   const loadError = useStore((s) => s.loadError);
   const openPhantom = useStore((s) => s.openPhantom);
-  const openFrames = useStore((s) => s.openFrames);
+  const requestImport = useStore((s) => s.requestImport);
   const toggleMeasureMode = useStore((s) => s.toggleMeasureMode);
   const cancelDraft = useStore((s) => s.cancelDraft);
   const removeMeasurement = useStore((s) => s.removeMeasurement);
@@ -25,9 +26,15 @@ export default function App() {
 
   const def = PHANTOM_CATALOG[0];
 
-  const tryFaulty = (mode: 'missing' | 'conflict') => {
+  const tryFaulty = (mode: 'missing' | 'conflict' | 'shuffle' | 'mixed') => {
     const { frames } = buildFaultyFrames(def, mode);
-    openFrames(frames, `${def.label}（${mode === 'missing' ? '缺片' : '方向冲突'}）`, { center: 120, width: 240 });
+    const modeLabel = {
+      missing: '缺片',
+      conflict: '方向冲突',
+      shuffle: '乱序',
+      mixed: '混合冲突',
+    }[mode];
+    requestImport(frames, `${def.label}（${modeLabel}）`, { center: 120, width: 240 });
   };
 
   const markerWorld = volume
@@ -50,6 +57,12 @@ export default function App() {
           <button className="danger" onClick={() => tryFaulty('conflict')}>
             载入方向冲突序列
           </button>
+          <button onClick={() => tryFaulty('shuffle')}>
+            预览：乱序序列
+          </button>
+          <button className="danger" onClick={() => tryFaulty('mixed')}>
+            载入混合冲突序列
+          </button>
           <button
             className={measureMode ? 'active' : ''}
             onClick={toggleMeasureMode}
@@ -71,6 +84,8 @@ export default function App() {
           <button onClick={dismissError}>知道了</button>
         </div>
       )}
+
+      <ImportPreview />
 
       {!volume ? (
         <div className="empty-state">
@@ -102,6 +117,22 @@ export default function App() {
               <dd className="mono">
                 {markerWorld ? `(${markerWorld.map((c) => c.toFixed(2)).join(', ')})` : '-'}
               </dd>
+              {volume.importInfo && (
+                <>
+                  <dt>导入判定</dt>
+                  <dd className="small">
+                    {volume.importInfo.reversedOrder ? '整批层序翻转，已按空间位置反向重排' : '层序方向一致'}
+                    {volume.importInfo.shuffled ? '；存在乱序帧，已按位置重排' : ''}
+                    <br />
+                    提供顺序 {volume.importInfo.sourceDirectionLabel || '—'} → 层方向 {volume.importInfo.layerDirectionLabel}
+                  </dd>
+                  <dt>原始来源</dt>
+                  <dd className="mono small">
+                    {volume.importInfo.frameCount} 帧
+                    {volume.importInfo.sourceNames[0] ? `：${volume.importInfo.sourceNames[0]} …` : ''}
+                  </dd>
+                </>
+              )}
             </dl>
 
             {measureMode && (

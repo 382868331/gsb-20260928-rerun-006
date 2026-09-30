@@ -94,23 +94,34 @@ export function volumeToFrames(volume: Volume, reversed = false): ImageFrame[] {
       imagePositionPatient: ijkToWorld([0, 0, k], volume.origin, volume.direction, volume.spacing),
       imageOrientationPatient: [colDir, rowDir],
       pixelData: volume.data.subarray(k * nx * ny, (k + 1) * nx * ny),
+      sourceName: `${volume.label}/slice-${String(k).padStart(3, '0')}.dcm`,
     });
   }
   return frames;
 }
 
-export type FaultMode = 'none' | 'missing' | 'conflict';
+export type FaultMode = 'none' | 'missing' | 'conflict' | 'shuffle' | 'mixed';
 
 // 生成可能带故障的帧序列，用于验证组卷校验
 export function buildFaultyFrames(
   def: PhantomDef,
   mode: FaultMode,
-): { frames: ImageFrame[]; missingK?: number; conflictK?: number } {
+): {
+  frames: ImageFrame[];
+  missingK?: number;
+  conflictK?: number;
+  duplicateK?: number;
+  oppositeK?: number;
+  shuffleSwapped?: [number, number];
+} {
   const volume = createAnalyticVolume(def);
   const reversed = true; // 默认即翻转层序
   let frames = volumeToFrames(volume, reversed);
   let missingK: number | undefined;
   let conflictK: number | undefined;
+  let duplicateK: number | undefined;
+  let oppositeK: number | undefined;
+  let shuffleSwapped: [number, number] | undefined;
   if (mode === 'missing') {
     missingK = Math.floor(def.dimensions[2] / 2);
     // reversed 输出中体素 k 位于索引 nz-1-k
@@ -128,8 +139,52 @@ export function buildFaultyFrames(
         [1, 0, 0],
       ],
     };
+  } else if (mode === 'shuffle') {
+    // 仅打乱提供顺序（交换两帧），位置/方向都合法，应能按空间位置重排组卷
+    const nz = def.dimensions[2];
+    const a = 2;
+    const b = 9;
+    shuffleSwapped = [nz - 1 - a, nz - 1 - b];
+    [frames[a], frames[b]] = [frames[b], frames[a]];
+  } else if (mode === 'mixed') {
+    // 乱序 + 重复位置 + 缺片 + 相反方向 混在同一批，要求分别报告
+    const nz = def.dimensions[2];
+    const swapA = 1;
+    const swapB = 12;
+    [frames[swapA], frames[swapB]] = [frames[swapB], frames[swapA]];
+    shuffleSwapped = [swapA, swapB];
+
+    missingK = 7;
+    const dropIndex = nz - 1 - missingK;
+    frames = frames.filter((_, idx) => idx !== dropIndex);
+
+    // 重复位置：复制一帧并改成与另一帧相同的 imagePositionPatient
+    duplicateK = 5;
+    const dupSource = nz - 1 - duplicateK;
+    frames.push({
+      ...frames[dupSource],
+      sourceName: `${def.label}/DUPLICATE-of-slice-${String(duplicateK).padStart(3, '0')}.dcm`,
+    });
+
+    // 相反方向：翻转一个平面轴使法线反向，平面仍平行于切片轴
+    oppositeK = 9;
+    const oppIndex = frames.findIndex(
+      (fr) => fr.sourceName?.includes(`slice-${String(oppositeK).padStart(3, '0')}.dcm`),
+    );
+    if (oppIndex >= 0) {
+      const f = frames[oppIndex];
+      frames[oppIndex] = {
+        ...f,
+        // 仅翻转列方向：法线随之反向，但平面仍平行 —— 方向翻转冲突
+        imageOrientationPatient: [
+          [-f.imageOrientationPatient[0][0], -f.imageOrientationPatient[0][1], -f.imageOrientationPatient[0][2]],
+          f.imageOrientationPatient[1],
+        ],
+        sourceName: `${def.label}/OPPOSITE-slice-${String(oppositeK).padStart(3, '0')}.dcm`,
+      };
+    }
   }
-  return { frames, missingK, conflictK };
+  return { frames, missingK, conflictK, duplicateK, oppositeK, shuffleSwapped };
 }
 
 // 通过完整帧管线重建合法体数据（覆盖翻转层序排序路径）

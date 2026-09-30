@@ -16,6 +16,7 @@ import {
   phantomId,
 } from './phantom';
 import { extractSlice, planeToWorld } from './slices';
+import { analyzeFrameImport, buildVolumeFromAnalysis } from './importAnalysis';
 
 const def = PHANTOM_CATALOG[0];
 
@@ -121,5 +122,64 @@ describe('帧序列组卷', () => {
     expect(() => buildVolumeFromFrames([], 'x', { center: 0, width: 1 })).toThrow(VolumeBuildError);
     const one = buildFaultyFrames(def, 'none').frames.slice(0, 1);
     expect(() => buildVolumeFromFrames(one, 'x', { center: 0, width: 1 })).toThrow(VolumeBuildError);
+  });
+
+  it('整批层序翻转：识别为合法翻转而非乱序/冲突', () => {
+    const { frames } = buildFaultyFrames(def, 'none');
+    const a = analyzeFrameImport(frames);
+    expect(a.ok).toBe(true);
+    expect(a.reversedOrder).toBe(true);
+    expect(a.shuffled).toBe(false);
+    expect(a.reasons).toHaveLength(0);
+    expect(a.warnings.join(' ')).toContain('层序翻转');
+  });
+
+  it('乱序帧可重排，重排后空间测量与原始体数据一致', () => {
+    const original = createAnalyticVolume(def);
+    const { frames } = buildFaultyFrames(def, 'shuffle');
+    const a = analyzeFrameImport(frames);
+    expect(a.ok).toBe(true);
+    expect(a.shuffled).toBe(true);
+    const rebuilt = buildVolumeFromAnalysis(frames, def.label, original.window, a);
+    expect(rebuilt.spacing).toEqual(def.spacing);
+    const p1 = ijkToWorld([2, 3, 4], original.origin, original.direction, original.spacing);
+    const p2 = ijkToWorld([20, 15, 13], original.origin, original.direction, original.spacing);
+    const r1 = ijkToWorld([2, 3, 4], rebuilt.origin, rebuilt.direction, rebuilt.spacing);
+    const r2 = ijkToWorld([20, 15, 13], rebuilt.origin, rebuilt.direction, rebuilt.spacing);
+    expect(r1).toEqual(p1);
+    expect(distance(r1, r2)).toBeCloseTo(distance(p1, p2), 6);
+    const layerSize = def.dimensions[0] * def.dimensions[1];
+    for (let k = 0; k < def.dimensions[2]; k += 1) {
+      expect(Array.from(rebuilt.data.subarray(k * layerSize, (k + 1) * layerSize))).toEqual(
+        Array.from(original.data.subarray(k * layerSize, (k + 1) * layerSize)),
+      );
+    }
+  });
+
+  it('混合批次分别报告乱序、重复位置、缺片与相反方向', () => {
+    const { frames } = buildFaultyFrames(def, 'mixed');
+    const a = analyzeFrameImport(frames);
+    expect(a.ok).toBe(false);
+    const joined = a.reasons.join('\n');
+    expect(joined).toContain('缺片');
+    expect(joined).toContain('重复位置');
+    expect(joined).toContain('相反');
+    expect(a.shuffled).toBe(true);
+    expect(a.warnings.join(' ')).toContain('乱序');
+  });
+
+  it('相反方向混入会被当作方向翻转冲突，而非静默翻转', () => {
+    const { frames } = buildFaultyFrames(def, 'none');
+    const target = frames[4];
+    frames[4] = {
+      ...target,
+      imageOrientationPatient: [
+        [-target.imageOrientationPatient[0][0], -target.imageOrientationPatient[0][1], -target.imageOrientationPatient[0][2]],
+        target.imageOrientationPatient[1],
+      ],
+    };
+    const a = analyzeFrameImport(frames);
+    expect(a.ok).toBe(false);
+    expect(a.reasons.some((reason) => reason.includes('方向翻转冲突'))).toBe(true);
   });
 });
