@@ -194,3 +194,43 @@ button.active { background: #1f6feb; border-color: #1f6feb; }
   font-size: 12px;
 }
 .preview-warnings ul { margin: 6px 0 0 18px; padding: 0; }
+
+.compare-strip {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.compare-row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 6px; }
+.compare-pair {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid #2a313c;
+  border-radius: 6px;
+}
+.mini-slice { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.mini-slice canvas {
+  width: 96px;
+  height: 96px;
+  image-rendering: pixelated;
+  background: #000;
+  border-radius: 4px;
+}
+.mini-slice span { font-size: 11px; color: #9aa7b4; }
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  vertical-align: middle;
+}
+.badge-ok { background: #14351f; color: #5ee08a; border: 1px solid #245c36; }
+.badge-pending { background: #3a2f10; color: #ffd93d; border: 1px solid #6b5e1e; }
+.badge-out { background: #3d1418; color: #ff9aa8; border: 1px solid #7a2e38; }
+
+.measure-actions { display: flex; flex-direction: column; gap: 4px; }
+
+.decisions { margin-top: 10px; font-size: 12px; }
+.decisions summary { cursor: pointer; color: #9fd0ff; }
+.decisions ul { margin: 6px 0 0 16px; padding: 0; max-height: 160px; overflow-y: auto; }

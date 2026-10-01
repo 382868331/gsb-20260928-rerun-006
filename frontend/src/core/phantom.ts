@@ -194,3 +194,82 @@ export function buildPhantomFromFrames(def: PhantomDef): Volume {
   // 帧管线重建的是同一影像，保留稳定的数据集 id，重开后才能找回测量与浏览位置
   return { ...rebuilt, id: phantomId(def) };
 }
+
+export type PatchMode = 'fill' | 'replace' | 'mixed';
+
+// 缺片序列默认缺失的体素层 k（与 buildFaultyFrames('missing') 一致）
+export const MISSING_K = Math.floor(PHANTOM_CATALOG[0].dimensions[2] / 2);
+
+function frameAtK(def: PhantomDef, k: number, sourceName: string): ImageFrame {
+  const volume = createAnalyticVolume(def);
+  const nz = def.dimensions[2];
+  const frames = volumeToFrames(volume, true);
+  const base = frames[nz - 1 - k];
+  return {
+    ...base,
+    pixelData: Float32Array.from(base.pixelData),
+    sourceName,
+  };
+}
+
+// 生成同一批采集后续到达的补片/替换片，用于验证补片流程
+export function buildPatchBatch(
+  def: PhantomDef,
+  mode: PatchMode,
+): { frames: ImageFrame[]; label: string } {
+  const nz = def.dimensions[2];
+  if (mode === 'fill') {
+    // 补片：正好落在缺片槽位上
+    return {
+      frames: [frameAtK(def, MISSING_K, `${def.label}/patch-slice-${String(MISSING_K).padStart(3, '0')}.dcm`)],
+      label: '补片（填补缺片）',
+    };
+  }
+  if (mode === 'replace') {
+    // 替换片：与已采用切片同位置但内容不同（叠加高亮方块模拟影像更新）
+    const frames = [3, 11].map((k) => {
+      const frame = frameAtK(def, k, `${def.label}/replace-slice-${String(k).padStart(3, '0')}.dcm`);
+      const px = Float32Array.from(frame.pixelData);
+      for (let j = 4; j < 9; j += 1) {
+        for (let i = 4; i < 9; i += 1) px[i + j * frame.cols] = 255;
+      }
+      return { ...frame, pixelData: px };
+    });
+    return { frames, label: '替换片（同位置更新内容）' };
+  }
+  // mixed：补片 + 替换片 + 位置不在栅格 + 方向冲突 + 尺寸冲突，且到达顺序打乱
+  const fill = frameAtK(def, MISSING_K, `${def.label}/patch-slice-${String(MISSING_K).padStart(3, '0')}.dcm`);
+  const replaceK = 5;
+  const replaceBase = frameAtK(def, replaceK, `${def.label}/replace-slice-${String(replaceK).padStart(3, '0')}.dcm`);
+  const replacePx = Float32Array.from(replaceBase.pixelData);
+  for (let j = 10; j < 15; j += 1) {
+    for (let i = 10; i < 15; i += 1) replacePx[i + j * replaceBase.cols] = 255;
+  }
+  const replacement = { ...replaceBase, pixelData: replacePx };
+  const offGridBase = frameAtK(def, 9, `${def.label}/offgrid-slice.dcm`);
+  const offGrid: ImageFrame = {
+    ...offGridBase,
+    imagePositionPatient: [
+      offGridBase.imagePositionPatient[0],
+      offGridBase.imagePositionPatient[1],
+      offGridBase.imagePositionPatient[2] + 0.7,
+    ],
+  };
+  const oppBase = frameAtK(def, 6, `${def.label}/opposite-slice-006.dcm`);
+  const opposite: ImageFrame = {
+    ...oppBase,
+    imageOrientationPatient: [
+      [-oppBase.imageOrientationPatient[0][0], -oppBase.imageOrientationPatient[0][1], -oppBase.imageOrientationPatient[0][2]],
+      oppBase.imageOrientationPatient[1],
+    ],
+  };
+  const wrongSize: ImageFrame = {
+    ...frameAtK(def, 7, `${def.label}/wrongsize-slice.dcm`),
+    rows: def.dimensions[1] - 2,
+    pixelData: new Float32Array(def.dimensions[0] * (def.dimensions[1] - 2)),
+  };
+  // 打乱到达顺序：最终排列不应依赖到达先后
+  const frames = [wrongSize, replacement, offGrid, fill, opposite];
+  void nz;
+  return { frames, label: '混合补片包（乱序到达）' };
+}

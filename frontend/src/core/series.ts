@@ -155,3 +155,106 @@ export function buildVolumeFromFrames(
     window,
   };
 }
+
+export interface VolumeSlot {
+  t: number; // 沿切片轴投影位置 (mm)，槽位需等距且按 t 升序
+  frame: ImageFrame | null; // null = 该层缺片，以 NaN 占位保留槽位
+}
+
+// 由槽位序列组卷：缺片层保留为 NaN 占位层，不会被其它位置的切片顶替。
+export function buildVolumeFromSlots(
+  slots: VolumeSlot[],
+  label: string,
+  window: Volume['window'],
+): Volume {
+  const present = slots.filter((s) => s.frame !== null);
+  const reasons: string[] = [];
+  if (present.length === 0) reasons.push('序列为空：没有任何影像帧');
+  if (present.length < 2) reasons.push('切片数量不足：至少需要 2 帧才能确定层间距');
+  if (slots.length < 2) reasons.push('槽位数量不足：至少需要 2 层');
+  if (reasons.length > 0) throw new VolumeBuildError(reasons);
+
+  const first = present[0].frame!;
+  const rows = first.rows;
+  const cols = first.cols;
+  const rowSpacing = first.rowSpacing;
+  const colSpacing = first.colSpacing;
+  for (const { frame } of present) {
+    const f = frame!;
+    if (f.rows !== rows || f.cols !== cols) {
+      reasons.push(`帧 ${f.sourceName ?? '?'} 尺寸 ${f.cols}x${f.rows} 与其余帧 ${cols}x${rows} 不一致`);
+    }
+    if (f.pixelData.length !== rows * cols) {
+      reasons.push(`帧 ${f.sourceName ?? '?'} 像素数 ${f.pixelData.length}，应为 ${rows * cols}`);
+    }
+    if (Math.abs(f.rowSpacing - rowSpacing) > 1e-6 ||
+        Math.abs(f.colSpacing - colSpacing) > 1e-6) {
+      reasons.push(`帧 ${f.sourceName ?? '?'} 像素间距与其余帧不一致`);
+    }
+    const [c, r] = f.imageOrientationPatient;
+    if (!nearlyParallel(c, first.imageOrientationPatient[0]) ||
+        !nearlyParallel(r, first.imageOrientationPatient[1])) {
+      reasons.push(`帧 ${f.sourceName ?? '?'} 方向与其余帧冲突，无法对齐到同一栅格`);
+    }
+  }
+
+  // 槽位等距校验
+  let layerSpacing = Infinity;
+  for (let i = 1; i < slots.length; i += 1) {
+    const delta = slots[i].t - slots[i - 1].t;
+    if (!(delta > EPS)) reasons.push(`槽位 ${i - 1} 与 ${i} 位置重合`);
+    else layerSpacing = Math.min(layerSpacing, delta);
+  }
+  if (reasons.length > 0) throw new VolumeBuildError(reasons);
+  if (!(layerSpacing > EPS) || !Number.isFinite(layerSpacing)) {
+    throw new VolumeBuildError(['无法确定层间距']);
+  }
+  for (let i = 1; i < slots.length; i += 1) {
+    const ratio = (slots[i].t - slots[i - 1].t) / layerSpacing;
+    if (Math.abs(ratio - Math.round(ratio)) > 1e-3) {
+      reasons.push(`槽位 ${i - 1}→${i} 间距不是基础间距 ${layerSpacing.toFixed(3)}mm 的整数倍，栅格不等距`);
+    }
+  }
+  if (reasons.length > 0) throw new VolumeBuildError(reasons);
+
+  // 切片轴方向：沿投影递增方向（由首尾在场帧的位置差估计，允许层序翻转）
+  const firstPresent = present[0].frame!;
+  const lastPresent = present[present.length - 1].frame!;
+  const [colDir, rowDir] = firstPresent.imageOrientationPatient;
+  const frameNormal = cross(rowDir, colDir);
+  const span = vecSub(lastPresent.imagePositionPatient, firstPresent.imagePositionPatient);
+  const layerDir: Vec3 = norm(span) > EPS
+    ? [span[0] / norm(span), span[1] / norm(span), span[2] / norm(span)]
+    : frameNormal;
+
+  const colUnit: Vec3 = [colDir[0], colDir[1], colDir[2]];
+  const rowUnit: Vec3 = [rowDir[0], rowDir[1], rowDir[2]];
+  const direction: Mat3 = makeMat3([colUnit, rowUnit, layerDir]);
+  const spacing: [number, number, number] = [colSpacing, rowSpacing, layerSpacing];
+
+  // 原点：槽位 0 的患者坐标（由最近在场帧沿轴回推）
+  const firstSlotIndex = slots.findIndex((s) => s.frame !== null);
+  const anchor = slots[firstSlotIndex].frame!.imagePositionPatient;
+  const origin: Vec3 = [
+    anchor[0] - layerDir[0] * layerSpacing * firstSlotIndex,
+    anchor[1] - layerDir[1] * layerSpacing * firstSlotIndex,
+    anchor[2] - layerDir[2] * layerSpacing * firstSlotIndex,
+  ];
+
+  const nz = slots.length;
+  const dimensions: [number, number, number] = [cols, rows, nz];
+  const data = new Float32Array(cols * rows * nz);
+  data.fill(NaN);
+  const missingMask: string[] = [];
+  for (let k = 0; k < nz; k += 1) {
+    const frame = slots[k].frame;
+    if (frame) data.set(frame.pixelData, k * rows * cols);
+    missingMask.push(frame ? '1' : '0');
+  }
+
+  const id = stableHash(
+    `${label}|${dimensions.join('x')}|${spacing.map((s) => s.toFixed(4)).join(',')}|${direction.join(',')}|${origin.join(',')}|m${missingMask.join('')}`,
+  );
+
+  return { id, label, dimensions, spacing, direction, origin, data, window };
+}

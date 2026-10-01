@@ -1,5 +1,5 @@
-import type { ImageFrame, ImportInfo, Volume } from './types';
-import { buildVolumeFromFrames } from './series';
+import type { AcquisitionInfo, ImageFrame, ImportInfo, SliceDecision, SliceSlot, Volume } from './types';
+import { buildVolumeFromFrames, buildVolumeFromSlots, type VolumeSlot } from './series';
 import { cross, directionLabel, dot, EPS, norm } from './geometry';
 
 function basicFrameReasons(frames: ImageFrame[]): string[] {
@@ -66,10 +66,15 @@ export interface ImportAnalysis {
   outOfOrderPairs: Array<[number, number]>; // 提供顺序中位置错位的帧对（源索引）
   // 非致命说明（乱序、整批翻转），仍可组卷
   warnings: string[];
+  // 缺片槽位的空间位置 t（这些层以空缺保留，等待后续补片，不会被其它位置顶替）
+  missingSlots: number[];
   // 致命冲突：方向相反/无法对齐、重复位置、缺片、栅格不等距等
   reasons: string[];
   ok: boolean;
 }
+
+// 初始采集 id：首个批次固定为 acq-1，之后每次补片/替换片批次递增
+export const INITIAL_ACQUISITION = 'acq-1';
 
 function frameName(frame: ImageFrame, index: number): string {
   return (frame as { sourceName?: string }).sourceName ?? `第 ${index} 帧`;
@@ -101,6 +106,7 @@ export function analyzeFrameImport(
       shuffled: false,
       outOfOrderPairs: [],
       warnings,
+      missingSlots: [],
       reasons,
       ok: false,
     };
@@ -183,6 +189,7 @@ export function analyzeFrameImport(
   }
 
   // 缺片 / 栅格不等距
+  const missingSlots: number[] = [];
   if (Number.isFinite(layerSpacing) && layerSpacing > EPS) {
     for (let i = 1; i < sorted.length; i += 1) {
       const delta = sorted[i].t - sorted[i - 1].t;
@@ -195,13 +202,19 @@ export function analyzeFrameImport(
         );
       } else if (integerRatio >= 2) {
         for (let m = 1; m < integerRatio; m += 1) {
-          reasons.push(
-            `缺片：第 ${sorted[i - 1].sourceIndex} 帧与第 ${sorted[i].sourceIndex} 帧之间缺少位置 t=${(sorted[i - 1].t + m * layerSpacing).toFixed(3)}mm 的切片`,
+          const t = sorted[i - 1].t + m * layerSpacing;
+          missingSlots.push(t);
+          warnings.push(
+            `缺片：第 ${sorted[i - 1].sourceIndex} 帧与第 ${sorted[i].sourceIndex} 帧之间缺少位置 t=${t.toFixed(3)}mm 的切片；该层将以空缺保留，可等待同一批采集的补片，不会被其它位置的切片顶替`,
           );
         }
       }
     }
-    sorted.forEach((p, i) => { p.layer = i; });
+    // 层号按栅格槽位分配：缺片槽位也占层号，补片到达时填入对应槽位
+    const t0 = sorted[0].t;
+    for (const p of sorted) {
+      p.layer = Math.round((p.t - t0) / layerSpacing);
+    }
   } else {
     layerSpacing = NaN;
   }
@@ -244,6 +257,7 @@ export function analyzeFrameImport(
     shuffled,
     outOfOrderPairs,
     warnings,
+    missingSlots,
     reasons,
     ok: reasons.length === 0,
   };
@@ -258,7 +272,25 @@ export function buildVolumeFromAnalysis(
   analysis: ImportAnalysis,
   sourceNames?: string[],
 ): Volume {
-  const volume = buildVolumeFromFrames(frames, label, window);
+  const names = sourceNames ?? frames.map((_, i) => frameName(frames[i], i));
+  let volume: Volume;
+  if (analysis.missingSlots.length > 0) {
+    // 含缺片槽位：按槽位组卷，缺片层以 NaN 占位保留
+    const t0 = analysis.placements[0].t;
+    const spacing = analysis.layerSpacing!;
+    const slotCount = Math.max(...analysis.placements.map((p) => p.layer)) + 1;
+    const slots: VolumeSlot[] = [];
+    for (let k = 0; k < slotCount; k += 1) {
+      const placement = analysis.placements.find((p) => p.layer === k);
+      slots.push({
+        t: t0 + k * spacing,
+        frame: placement ? frames[placement.sourceIndex] : null,
+      });
+    }
+    volume = buildVolumeFromSlots(slots, label, window);
+  } else {
+    volume = buildVolumeFromFrames(frames, label, window);
+  }
   const importInfo: ImportInfo = {
     sourceOrder: analysis.placements.map((p) => p.sourceIndex),
     frameCount: analysis.frameCount,
@@ -266,8 +298,35 @@ export function buildVolumeFromAnalysis(
     layerDirectionLabel: analysis.layerDirectionLabel,
     reversedOrder: analysis.reversedOrder,
     shuffled: analysis.shuffled,
-    sourceNames:
-      sourceNames ?? frames.map((_, i) => frameName(frames[i], i)),
+    sourceNames: names,
   };
-  return { ...volume, importInfo };
+  // 初始采集：每层切片的采用清单与决定，后续补片/替换片在此基础上更新
+  const acquisitions: AcquisitionInfo[] = [
+    { id: INITIAL_ACQUISITION, label, kind: 'initial', arrivedAt: Date.now() },
+  ];
+  const spacing = volume.spacing[2];
+  const t0 = analysis.placements[0].t;
+  const sliceManifest: SliceSlot[] = [];
+  const sliceDecisions: SliceDecision[] = [];
+  for (let k = 0; k < volume.dimensions[2]; k += 1) {
+    const placement = analysis.placements.find((p) => p.layer === k);
+    const t = t0 + k * spacing;
+    sliceManifest.push({
+      t,
+      layer: k,
+      status: placement ? 'adopted' : 'missing',
+      sourceName: placement ? names[placement.sourceIndex] : null,
+      acquisition: placement ? INITIAL_ACQUISITION : null,
+    });
+    sliceDecisions.push({
+      t,
+      layer: k,
+      adopted: placement
+        ? { sourceName: names[placement.sourceIndex], acquisition: INITIAL_ACQUISITION }
+        : null,
+      rejected: [],
+      decidedAt: Date.now(),
+    });
+  }
+  return { ...volume, importInfo, sliceManifest, acquisitions, sliceDecisions };
 }

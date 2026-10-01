@@ -32,6 +32,38 @@ export interface Volume {
   window: { center: number; width: number };
   // 导入判定（仅外部帧序列组卷时存在）
   importInfo?: ImportInfo;
+  // 每一层切片的采用清单（含缺片空槽）；缺片层在 data 中以 NaN 占位
+  sliceManifest?: SliceSlot[];
+  // 到达的采集批次（初始采集 + 每次补片/替换片批次）
+  acquisitions?: AcquisitionInfo[];
+  // 每个空间位置上候选切片的采用决定（含被拒绝的替换片）
+  sliceDecisions?: SliceDecision[];
+}
+
+// 体数据沿切片轴的一个槽位：已采用的切片或仍空缺（缺片）
+export interface SliceSlot {
+  t: number; // 沿切片轴的患者坐标投影 (mm)
+  layer: number; // 体数据层号 k
+  status: 'adopted' | 'missing';
+  sourceName: string | null;
+  // 该层内容来自哪一版采集
+  acquisition: string | null;
+}
+
+export interface AcquisitionInfo {
+  id: string;
+  label: string;
+  kind: 'initial' | 'patch';
+  arrivedAt: number;
+}
+
+// 同一空间位置上多张候选切片的采用决定
+export interface SliceDecision {
+  t: number;
+  layer: number;
+  adopted: { sourceName: string; acquisition: string } | null; // null = 仍缺片
+  rejected: Array<{ sourceName: string; acquisition: string }>;
+  decidedAt: number;
 }
 
 // 一次帧序列导入的空间排列判定与原始来源
@@ -57,6 +89,10 @@ export interface Measurement {
   p2: Vec3;
   distance: number; // mm
   createdAt: number;
+  // 测量所依据的采集版本 id（作出该测量时体数据的内容版本）
+  basisAcquisition?: string;
+  // 替换片改变了相关切片内容时进入待复核；未受影响保持 confirmed
+  review?: 'confirmed' | 'pending';
 }
 
 export class VolumeBuildError extends Error {

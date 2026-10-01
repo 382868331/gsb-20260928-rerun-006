@@ -2,9 +2,11 @@ import { useEffect } from 'react';
 import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
 import { ImportPreview } from './components/ImportPreview';
+import { PatchPreview } from './components/PatchPreview';
 import { SLICE_PLANES } from './core/slices';
-import { PHANTOM_CATALOG, buildFaultyFrames } from './core/phantom';
+import { PHANTOM_CATALOG, buildFaultyFrames, buildPatchBatch, type PatchMode } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
+import { measurementRangeStatus } from './core/patch';
 
 export default function App() {
   const volume = useStore((s) => s.volume);
@@ -13,8 +15,12 @@ export default function App() {
   const measureMode = useStore((s) => s.measureMode);
   const draftPoint = useStore((s) => s.draftPoint);
   const loadError = useStore((s) => s.loadError);
+  const lastUpdate = useStore((s) => s.lastUpdate);
   const openPhantom = useStore((s) => s.openPhantom);
   const requestImport = useStore((s) => s.requestImport);
+  const requestPatch = useStore((s) => s.requestPatch);
+  const undoPatch = useStore((s) => s.undoPatch);
+  const confirmMeasurement = useStore((s) => s.confirmMeasurement);
   const toggleMeasureMode = useStore((s) => s.toggleMeasureMode);
   const cancelDraft = useStore((s) => s.cancelDraft);
   const removeMeasurement = useStore((s) => s.removeMeasurement);
@@ -36,6 +42,14 @@ export default function App() {
     }[mode];
     requestImport(frames, `${def.label}（${modeLabel}）`, { center: 120, width: 240 });
   };
+
+  const receivePatch = (mode: PatchMode) => {
+    const { frames, label } = buildPatchBatch(def, mode);
+    requestPatch(frames, `${def.label}·${label}`);
+  };
+
+  const acquisitionLabel = (id?: string) =>
+    volume?.acquisitions?.find((a) => a.id === id)?.label ?? id ?? '初始采集';
 
   const markerWorld = volume
     ? ijkToWorld(def.markerIjk, volume.origin, volume.direction, volume.spacing)
@@ -63,6 +77,20 @@ export default function App() {
           <button className="danger" onClick={() => tryFaulty('mixed')}>
             载入混合冲突序列
           </button>
+          <button onClick={() => receivePatch('fill')} disabled={!volume}>
+            接收补片（填补缺片）
+          </button>
+          <button onClick={() => receivePatch('replace')} disabled={!volume}>
+            接收替换片
+          </button>
+          <button onClick={() => receivePatch('mixed')} disabled={!volume}>
+            接收混合补片包
+          </button>
+          {lastUpdate && (
+            <button className="danger" onClick={undoPatch}>
+              撤销更新
+            </button>
+          )}
           <button
             className={measureMode ? 'active' : ''}
             onClick={toggleMeasureMode}
@@ -86,6 +114,7 @@ export default function App() {
       )}
 
       <ImportPreview />
+      <PatchPreview />
 
       {!volume ? (
         <div className="empty-state">
@@ -133,7 +162,51 @@ export default function App() {
                   </dd>
                 </>
               )}
+              {volume.acquisitions && volume.acquisitions.length > 0 && (
+                <>
+                  <dt>采集批次</dt>
+                  <dd className="small">
+                    {volume.acquisitions.map((a) => (
+                      <div key={a.id}>
+                        {a.id} · {a.kind === 'initial' ? '初始采集' : '补片批次'} · {a.label}
+                      </div>
+                    ))}
+                  </dd>
+                </>
+              )}
+              {volume.sliceManifest && (
+                <>
+                  <dt>缺片层</dt>
+                  <dd className="small">
+                    {volume.sliceManifest.filter((s) => s.status === 'missing').length === 0
+                      ? '无'
+                      : volume.sliceManifest
+                          .filter((s) => s.status === 'missing')
+                          .map((s) => `第 ${s.layer + 1} 层`)
+                          .join('、')}
+                  </dd>
+                </>
+              )}
             </dl>
+
+            {volume.sliceDecisions && volume.sliceDecisions.some((d) => d.rejected.length > 0 || d.adopted) && (
+              <details className="decisions">
+                <summary>切片采用决定（{volume.sliceDecisions.length}）</summary>
+                <ul>
+                  {volume.sliceDecisions.map((d, i) => (
+                    <li key={i} className="small">
+                      第 {d.layer + 1} 层：
+                      {d.adopted
+                        ? `采用 ${d.adopted.sourceName}（${d.adopted.acquisition}）`
+                        : '仍缺片'}
+                      {d.rejected.length > 0
+                        ? `；拒绝 ${d.rejected.map((r) => r.sourceName).join('、')}`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
 
             {measureMode && (
               <div className="measure-hint">
@@ -150,12 +223,33 @@ export default function App() {
                 <li key={m.id}>
                   <div>
                     <strong>{m.distance.toFixed(3)} mm</strong>
+                    {m.review === 'pending' ? (
+                      <span className="badge badge-pending">待复核</span>
+                    ) : (
+                      <span className="badge badge-ok">已确认</span>
+                    )}
+                    {(() => {
+                      const status = measurementRangeStatus(volume, m);
+                      if (status === 'out-of-range') {
+                        return <span className="badge badge-out">超出有效范围</span>;
+                      }
+                      if (status === 'on-missing') {
+                        return <span className="badge badge-out">位于缺片层</span>;
+                      }
+                      return <span className="badge badge-ok">在有效范围内</span>;
+                    })()}
                     <div className="mono small">
                       ({m.p1.map((c) => c.toFixed(1)).join(', ')}) →
                       ({m.p2.map((c) => c.toFixed(1)).join(', ')})
                     </div>
+                    <div className="small">依据采集：{acquisitionLabel(m.basisAcquisition)}</div>
                   </div>
-                  <button onClick={() => removeMeasurement(m.id)}>删除</button>
+                  <div className="measure-actions">
+                    {m.review === 'pending' && (
+                      <button onClick={() => confirmMeasurement(m.id)}>复核确认</button>
+                    )}
+                    <button onClick={() => removeMeasurement(m.id)}>删除</button>
+                  </div>
                 </li>
               ))}
             </ul>

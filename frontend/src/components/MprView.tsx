@@ -77,7 +77,9 @@ export function MprView({ volume, axis, slice }: MprViewProps) {
     if (offCtx) {
       const imageData = offCtx.createImageData(nU, nV);
       for (let i = 0; i < img.length; i += 1) {
-        const g = windowLevel(img[i], volume.window.center, volume.window.width);
+        const g = Number.isFinite(img[i])
+          ? windowLevel(img[i], volume.window.center, volume.window.width)
+          : 0; // 缺片层体素为 NaN，渲染为黑
         imageData.data[i * 4] = g;
         imageData.data[i * 4 + 1] = g;
         imageData.data[i * 4 + 2] = g;
@@ -86,6 +88,26 @@ export function MprView({ volume, axis, slice }: MprViewProps) {
       offCtx.putImageData(imageData, 0, 0);
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(off, offsetX, offsetY, drawW, drawH);
+    }
+
+    // 缺片层：明确标示该层无影像（等待补片），而非显示空白让人误以为有内容
+    const slot = axis === 2 ? volume.sliceManifest?.[slice] : undefined;
+    if (slot && slot.status === 'missing') {
+      ctx.fillStyle = 'rgba(122, 46, 56, 0.35)';
+      ctx.fillRect(offsetX, offsetY, drawW, drawH);
+      ctx.strokeStyle = '#7a2e38';
+      ctx.lineWidth = 1;
+      for (let x = -drawH; x < drawW; x += 12) {
+        ctx.beginPath();
+        ctx.moveTo(offsetX + x, offsetY + drawH);
+        ctx.lineTo(offsetX + x + drawH, offsetY);
+        ctx.stroke();
+      }
+      ctx.fillStyle = '#ff9aa8';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`缺片（t=${slot.t.toFixed(2)}mm，等待补片）`, canvasSize / 2, canvasSize / 2);
+      ctx.textAlign = 'left';
     }
 
     const ijkPointOnPlane = (world: Parameters<typeof worldToIjk>[0]) => {

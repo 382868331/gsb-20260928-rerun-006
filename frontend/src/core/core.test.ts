@@ -161,9 +161,11 @@ describe('帧序列组卷', () => {
     const a = analyzeFrameImport(frames);
     expect(a.ok).toBe(false);
     const joined = a.reasons.join('\n');
-    expect(joined).toContain('缺片');
     expect(joined).toContain('重复位置');
     expect(joined).toContain('相反');
+    // 缺片不再是致命冲突：作为空缺槽位保留，等待补片
+    expect(a.warnings.join('\n')).toContain('缺片');
+    expect(a.missingSlots.length).toBeGreaterThan(0);
     expect(a.shuffled).toBe(true);
     expect(a.warnings.join(' ')).toContain('乱序');
   });
