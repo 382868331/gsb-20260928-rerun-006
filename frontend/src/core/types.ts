@@ -57,6 +57,12 @@ export interface Measurement {
   p2: Vec3;
   distance: number; // mm
   createdAt: number;
+  // 测量复核状态：confirmed=已确认；review=其所依据的切片内容被替换/补全，需要人工复核
+  reviewStatus?: 'confirmed' | 'review';
+  // 测量所依据的采集版本（批次 id）；原始体数据为 'base'
+  basisVersion?: string;
+  // 最近一次状态判定时，两端点是否都落在有效影像范围内（在包围盒内且不在缺片层）
+  endpointsInRange?: boolean;
 }
 
 export class VolumeBuildError extends Error {

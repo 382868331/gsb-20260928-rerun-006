@@ -2,8 +2,9 @@ import { useEffect } from 'react';
 import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
 import { ImportPreview } from './components/ImportPreview';
+import { SupplementPreview } from './components/SupplementPreview';
 import { SLICE_PLANES } from './core/slices';
-import { PHANTOM_CATALOG, buildFaultyFrames } from './core/phantom';
+import { PHANTOM_CATALOG, buildFaultyFrames, buildGappedBaseFrames, buildSupplementFrames } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
 
 export default function App() {
@@ -19,6 +20,12 @@ export default function App() {
   const cancelDraft = useStore((s) => s.cancelDraft);
   const removeMeasurement = useStore((s) => s.removeMeasurement);
   const dismissError = useStore((s) => s.dismissError);
+  const openGappedFrames = useStore((s) => s.openGappedFrames);
+  const requestSupplement = useStore((s) => s.requestSupplement);
+  const undoLastBatch = useStore((s) => s.undoLastBatch);
+  const reconfirmMeasurement = useStore((s) => s.reconfirmMeasurement);
+  const manifest = useStore((s) => s.manifest);
+  const adoptedBatches = useStore((s) => s.adoptedBatches);
 
   useEffect(() => {
     restoreLastSession();
@@ -35,6 +42,40 @@ export default function App() {
       mixed: '混合冲突',
     }[mode];
     requestImport(frames, `${def.label}（${modeLabel}）`, { center: 120, width: 240 });
+  };
+
+  // 打开一个带缺片的基底（同一体模，抽掉中间两层），随后可接收补片
+  const openGapped = () => {
+    const { frames } = buildGappedBaseFrames(def);
+    openGappedFrames(frames, def.label + '（缺片基底）', { center: 120, width: 240 });
+  };
+
+  // 同一批采集：补一张缺片 + 替换一张现有层 + 一张重复 + 一个方向/尺寸冲突
+  const receiveMixedBatch = () => {
+    const gaps = buildGappedBaseFrames(def).missingLayers;
+    const batch = buildSupplementFrames(def, {
+      fillK: [gaps[0]],
+      replaceK: [4],
+      duplicateK: [10],
+      sizeConflictK: 6,
+      orientationConflictK: 8,
+      shuffle: true,
+    });
+    requestSupplement(batch.frames);
+  };
+
+  // 仅补另一张缺片（补的是另一个位置，第一张缺片不应消失）
+  const receiveFillOther = () => {
+    const gaps = buildGappedBaseFrames(def).missingLayers;
+    const batch = buildSupplementFrames(def, { fillK: [gaps[1]], shuffle: true });
+    requestSupplement(batch.frames);
+  };
+
+  // 同批补片分两次、不同到达顺序到达，最终排列应一致
+  const receiveFillFirst = () => {
+    const gaps = buildGappedBaseFrames(def).missingLayers;
+    const batch = buildSupplementFrames(def, { fillK: [gaps[0]], shuffle: false });
+    requestSupplement(batch.frames);
   };
 
   const markerWorld = volume
@@ -63,6 +104,21 @@ export default function App() {
           <button className="danger" onClick={() => tryFaulty('mixed')}>
             载入混合冲突序列
           </button>
+          <button onClick={openGapped}>
+            打开缺片基底（补片流程）
+          </button>
+          <button onClick={receiveMixedBatch} disabled={!manifest}>
+            接收混合补片批
+          </button>
+          <button onClick={receiveFillOther} disabled={!manifest}>
+            接收另一位置补片
+          </button>
+          <button onClick={receiveFillFirst} disabled={!manifest}>
+            接收缺片补片
+          </button>
+          <button onClick={undoLastBatch} disabled={adoptedBatches.length === 0}>
+            撤销上一批（{adoptedBatches.length}）
+          </button>
           <button
             className={measureMode ? 'active' : ''}
             onClick={toggleMeasureMode}
@@ -86,6 +142,7 @@ export default function App() {
       )}
 
       <ImportPreview />
+      <SupplementPreview />
 
       {!volume ? (
         <div className="empty-state">
@@ -147,19 +204,40 @@ export default function App() {
             <h3>测量结果（{measurements.length}）</h3>
             <ul className="measure-list">
               {measurements.map((m) => (
-                <li key={m.id}>
+                <li key={m.id} className={m.reviewStatus === 'review' ? 'measure-review' : ''}>
                   <div>
                     <strong>{m.distance.toFixed(3)} mm</strong>
+                    {m.reviewStatus === 'review' && (
+                      <span className="badge badge-review">待复核</span>
+                    )}
+                    {m.endpointsInRange === false && (
+                      <span className="badge badge-out">超出有效影像范围</span>
+                    )}
                     <div className="mono small">
                       ({m.p1.map((c) => c.toFixed(1)).join(', ')}) →
                       ({m.p2.map((c) => c.toFixed(1)).join(', ')})
                     </div>
+                    <div className="mono small hint">
+                      依据采集：{m.basisVersion ?? 'base'} ·
+                      有效性：{m.endpointsInRange === undefined ? '—' : m.endpointsInRange ? '在有效影像内' : '越界'}
+                    </div>
                   </div>
-                  <button onClick={() => removeMeasurement(m.id)}>删除</button>
+                  <div className="measure-actions">
+                    {m.reviewStatus === 'review' && (
+                      <button onClick={() => reconfirmMeasurement(m.id)}>确认复核</button>
+                    )}
+                    <button onClick={() => removeMeasurement(m.id)}>删除</button>
+                  </div>
                 </li>
               ))}
             </ul>
-            <p className="hint">浏览位置与测量自动保存；重开工程后恢复到原切片与定位点。</p>
+            {manifest && (
+              <p className="hint">
+                分层采用：第 {manifest.layers.map((src, k) => (src ? null : k + 1)).filter((x) => x !== null).join('、') || '无'} 层缺片。
+                已应用补丁批次 {adoptedBatches.length} 个；替换内容影响的测量进入待复核。
+              </p>
+            )}
+            <p className="hint">浏览位置与测量自动保存；重开后恢复原切片、定位点、每张切片采用决定与测量依据的采集版本。</p>
           </aside>
         </main>
       )}

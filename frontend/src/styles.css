@@ -194,3 +194,44 @@ button.active { background: #1f6feb; border-color: #1f6feb; }
   font-size: 12px;
 }
 .preview-warnings ul { margin: 6px 0 0 18px; padding: 0; }
+
+.modal-wide { max-width: 1000px; width: min(1000px, 94vw); }
+.modal-wide .preview-table-wrap { max-height: 320px; }
+
+.candidate-controls { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.row-selected { background: rgba(63, 185, 80, 0.08); }
+.thumb { width: 56px; height: 44px; object-fit: contain; background: #000; border: 1px solid #2a313c; border-radius: 4px; image-rendering: pixelated; }
+
+.compare-panel {
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid #2f6feb55;
+  border-radius: 8px;
+  background: #10161f;
+}
+.compare-panel h3 { font-size: 13px; margin: 0 0 8px; }
+.compare-images { display: flex; gap: 18px; flex-wrap: wrap; }
+.compare-images figure { margin: 0; text-align: center; }
+.compare-images figcaption { font-size: 12px; color: #9aa7b4; margin-bottom: 4px; }
+.compare-img {
+  width: 220px;
+  height: 180px;
+  object-fit: contain;
+  background: #000;
+  border: 1px solid #2a313c;
+  border-radius: 4px;
+  image-rendering: pixelated;
+}
+
+.measure-actions { display: flex; flex-direction: column; gap: 4px; flex: none; }
+.measure-review { background: rgba(255, 217, 61, 0.08); border-radius: 6px; }
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  font-size: 10px;
+  vertical-align: middle;
+}
+.badge-review { background: #6b5e1e; color: #ffe58a; }
+.badge-out { background: #7a2e38; color: #ff9aa8; }

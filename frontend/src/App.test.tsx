@@ -75,4 +75,38 @@ describe('应用集成', () => {
     // 已打开的导入数据仍在
     expect(screen.getByText('冠状 Coronal')).toBeTruthy();
   });
+
+  it('缺片基底接收补片：预览新增/替换/重复/冲突，确认后测量进入待复核并可撤销', () => {
+    render(<App />);
+    act(() => {
+      fireEvent.click(screen.getByText('打开缺片基底（补片流程）'));
+    });
+    expect(screen.getByText(/分层采用/)).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(screen.getByText('接收混合补片批'));
+    });
+    expect(screen.getByText(/补片 \/ 替换片预览/)).toBeTruthy();
+    expect(screen.getAllByText(/新增位置/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/替换片/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/重复位置/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/冲突/).length).toBeGreaterThan(0);
+
+    // 打开前后截面比较
+    act(() => {
+      fireEvent.click(screen.getAllByText(/比较第/)[0]);
+    });
+    expect(screen.getByText(/更新前 \/ 补片内容/)).toBeTruthy();
+
+    act(() => {
+      fireEvent.click(screen.getByText(/采用勾选的/));
+    });
+    expect(screen.queryByText(/补片 \/ 替换片预览/)).toBeNull();
+
+    // 撤销回到原数据
+    act(() => {
+      fireEvent.click(screen.getByText(/撤销上一批/));
+    });
+    expect(screen.getByText(/已应用补丁批次 0 个/)).toBeTruthy();
+  });
 });

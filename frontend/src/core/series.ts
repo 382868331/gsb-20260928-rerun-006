@@ -25,6 +25,28 @@ export function buildVolumeFromFrames(
   label: string,
   window: Volume['window'],
 ): Volume {
+  return buildVolumeFromFramesInternal(frames, label, window, false) as Volume;
+}
+
+// 允许缺片的组卷：帧之间的整数倍空档保留为空层（数据写 NaN），
+// 供“先打开缺片体数据、再接收补片”的工作流使用。栅格不等距等其余冲突仍拒绝。
+export function buildGappedVolumeFromFrames(
+  frames: ImageFrame[],
+  label: string,
+  window: Volume['window'],
+): { volume: Volume; presentLayers: number[] } {
+  return buildVolumeFromFramesInternal(frames, label, window, true) as {
+    volume: Volume;
+    presentLayers: number[];
+  };
+}
+
+function buildVolumeFromFramesInternal(
+  frames: ImageFrame[],
+  label: string,
+  window: Volume['window'],
+  allowGaps: boolean,
+): Volume | { volume: Volume; presentLayers: number[] } {
   const reasons: string[] = [];
   if (frames.length === 0) reasons.push('序列为空：没有任何影像帧');
   if (frames.length < 2) reasons.push('切片数量不足：至少需要 2 帧才能确定层间距');
@@ -106,7 +128,11 @@ export function buildVolumeFromFrames(
       reasons.push(`第 ${axisStep[i - 1].index}→${axisStep[i].index} 层间距 ${delta.toFixed(3)}mm 不是基础间距 ${layerSpacing.toFixed(3)}mm 的整数倍，栅格不等距，无法组成完整体数据`);
     } else if (integerRatio >= 2) {
       for (let m = 1; m < integerRatio; m += 1) {
-        reasons.push(`在第 ${axisStep[i - 1].index} 帧与第 ${axisStep[i].index} 帧之间缺片（缺少位置 t=${(axisStep[i - 1].t + m * layerSpacing).toFixed(3)}mm），切片序列不连续，无法组成完整体数据`);
+        if (!allowGaps) {
+          reasons.push('在第 ' + axisStep[i - 1].index + ' 帧与第 ' + axisStep[i].index +
+            ' 帧之间缺片（缺少位置 t=' + (axisStep[i - 1].t + m * layerSpacing).toFixed(3) +
+            'mm），切片序列不连续，无法组成完整体数据');
+        }
       }
     }
   }
@@ -129,18 +155,30 @@ export function buildVolumeFromFrames(
   const direction: Mat3 = makeMat3([colUnit, rowUnit, layerDir]);
   const spacing: [number, number, number] = [colSpacing, rowSpacing, layerSpacing];
 
-  const dimensions: [number, number, number] = [cols, rows, frames.length];
-  const data = new Float32Array(cols * rows * frames.length);
-  for (let k = 0; k < axisStep.length; k += 1) {
-    const frame = frames[axisStep[k].index];
+  // allowGaps 时按基础层间距推算总层数（含空档）；否则总层数就是帧数
+  let totalLayers = frames.length;
+  if (allowGaps) {
+    const span = axisStep[axisStep.length - 1].t - axisStep[0].t;
+    totalLayers = Math.round(span / layerSpacing) + 1;
+  }
+  const dimensions: [number, number, number] = [cols, rows, totalLayers];
+  const data = new Float32Array(cols * rows * totalLayers);
+  const presentLayers: number[] = [];
+  for (let rank = 0; rank < axisStep.length; rank += 1) {
+    const step = axisStep[rank];
+    const k = allowGaps
+      ? Math.round((step.t - axisStep[0].t) / layerSpacing)
+      : rank;
+    const frame = frames[step.index];
     data.set(frame.pixelData, k * rows * cols);
+    presentLayers.push(k);
   }
 
   const id = stableHash(
     `${label}|${dimensions.join('x')}|${spacing.map((s) => s.toFixed(4)).join(',')}|${direction.join(',')}|${firstFrame.imagePositionPatient.join(',')}`,
   );
 
-  return {
+  const volume: Volume = {
     id,
     label,
     dimensions,
@@ -154,4 +192,6 @@ export function buildVolumeFromFrames(
     data,
     window,
   };
+  if (allowGaps) return { volume, presentLayers };
+  return volume;
 }

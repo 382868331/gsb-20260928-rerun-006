@@ -64,6 +64,7 @@ export function planeToWorld(
 }
 
 export function windowLevel(value: number, center: number, width: number): number {
+  if (!Number.isFinite(value)) return 0;
   if (width <= 0) return 0;
   const v = ((value - (center - width / 2)) / width) * 255;
   return Math.max(0, Math.min(255, Math.round(v)));
