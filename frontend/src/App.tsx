@@ -3,6 +3,7 @@ import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
 import { ImportPreview } from './components/ImportPreview';
 import { PatchPreview } from './components/PatchPreview';
+import { ReviewMergePreview } from './components/ReviewMergePreview';
 import { SLICE_PLANES } from './core/slices';
 import { PHANTOM_CATALOG, buildFaultyFrames, buildPatchBatch, type PatchMode } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
@@ -16,6 +17,8 @@ export default function App() {
   const draftPoint = useStore((s) => s.draftPoint);
   const loadError = useStore((s) => s.loadError);
   const lastUpdate = useStore((s) => s.lastUpdate);
+  const lastMerge = useStore((s) => s.lastMerge);
+  const reviewBranches = useStore((s) => s.reviewBranches);
   const openPhantom = useStore((s) => s.openPhantom);
   const requestImport = useStore((s) => s.requestImport);
   const requestPatch = useStore((s) => s.requestPatch);
@@ -25,6 +28,10 @@ export default function App() {
   const cancelDraft = useStore((s) => s.cancelDraft);
   const removeMeasurement = useStore((s) => s.removeMeasurement);
   const dismissError = useStore((s) => s.dismissError);
+  const saveReviewSide = useStore((s) => s.saveReviewSide);
+  const openReviewSide = useStore((s) => s.openReviewSide);
+  const requestReviewMerge = useStore((s) => s.requestReviewMerge);
+  const undoReviewMerge = useStore((s) => s.undoReviewMerge);
 
   useEffect(() => {
     restoreLastSession();
@@ -91,6 +98,18 @@ export default function App() {
               撤销更新
             </button>
           )}
+          <button onClick={() => saveReviewSide('a', `${volume?.label ?? '审阅'} · 审阅 A`)} disabled={!volume}>
+            保存审阅 A
+          </button>
+          <button onClick={() => saveReviewSide('b', `${volume?.label ?? '审阅'} · 审阅 B`)} disabled={!volume}>
+            保存审阅 B
+          </button>
+          <button onClick={() => openReviewSide('a')} disabled={!reviewBranches.a}>重开审阅 A</button>
+          <button onClick={() => openReviewSide('b')} disabled={!reviewBranches.b}>重开审阅 B</button>
+          <button className="active" onClick={() => requestReviewMerge()} disabled={!reviewBranches.a || !reviewBranches.b}>
+            合并两份审阅
+          </button>
+          {lastMerge && <button className="danger" onClick={undoReviewMerge}>撤回合并</button>}
           <button
             className={measureMode ? 'active' : ''}
             onClick={toggleMeasureMode}
@@ -115,6 +134,7 @@ export default function App() {
 
       <ImportPreview />
       <PatchPreview />
+      <ReviewMergePreview />
 
       {!volume ? (
         <div className="empty-state">
@@ -243,6 +263,7 @@ export default function App() {
                       ({m.p2.map((c) => c.toFixed(1)).join(', ')})
                     </div>
                     <div className="small">依据采集：{acquisitionLabel(m.basisAcquisition)}</div>
+                    <div className="small">实际切片：{m.basisLayers?.map((k) => k + 1).join('、') ?? '—'}</div>
                   </div>
                   <div className="measure-actions">
                     {m.review === 'pending' && (

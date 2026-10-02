@@ -23,6 +23,14 @@ import {
   buildPhantomFromFrames,
   phantomId,
 } from '../core/phantom';
+import {
+  analyzeReviewMerge,
+  applyReviewMerge,
+  buildMeasurementBasis,
+  mergeMeasurements,
+  type ReviewMergeAnalysis,
+  type ReviewSide,
+} from '../core/reviewMerge';
 
 export type SliceTriple = [number, number, number];
 
@@ -54,6 +62,7 @@ interface PersistedImport {
   manifest?: SliceSlot[];
   acquisitions?: AcquisitionInfo[];
   decisions?: SliceDecision[];
+  mergeSources?: { a: string; b: string };
 }
 
 interface PersistedDoc {
@@ -62,6 +71,7 @@ interface PersistedDoc {
   lastDatasetId: string | null;
   // 数据集 id -> 原始帧来源（重开时按原帧重新分析、组卷，保留导入判定）
   imports: Record<string, PersistedImport>;
+  reviewBranches?: Partial<Record<ReviewSide, { id: string; label: string }>>;
 }
 
 const STORAGE_KEY = 'medical-workstation-v1';
@@ -109,6 +119,13 @@ interface WorkstationState {
     frames: ImageFrame[];
     choices: Record<number, boolean>;
   } | null;
+  // 两个独立审阅分支的三方合并预览
+  pendingReviewMerge: {
+    analysis: ReviewMergeAnalysis;
+    choices: Partial<Record<number, ReviewSide | null>>;
+  } | null;
+  reviewBranches: Partial<Record<ReviewSide, { id: string; label: string }>>;
+  lastMerge: { volume: Volume; measurements: Measurement[]; doc: PersistedDoc } | null;
   // 最近一次补片更新前的快照（撤销更新时回到原体数据与测量状态）
   lastUpdate: { volume: Volume; measurements: Measurement[]; doc: PersistedDoc } | null;
   slices: SliceTriple;
@@ -131,6 +148,13 @@ interface WorkstationState {
   cancelPatch: () => void;
   // 撤销最近一次补片更新，回到更新前的体数据与测量状态
   undoPatch: () => void;
+  saveReviewSide: (side: ReviewSide, label: string) => void;
+  openReviewSide: (side: ReviewSide) => void;
+  requestReviewMerge: () => void;
+  setReviewMergeChoice: (layer: number, side: ReviewSide | null) => void;
+  confirmReviewMerge: () => void;
+  cancelReviewMerge: () => void;
+  undoReviewMerge: () => void;
   // 复核确认：替换片更新后处于待复核的测量由用户重新确认
   confirmMeasurement: (id: string) => void;
   setSlice: (axis: 0 | 1 | 2, slice: number) => void;
@@ -197,6 +221,7 @@ export const useStore = create<WorkstationState>((set, get) => {
         manifest: volume.sliceManifest,
         acquisitions: volume.acquisitions,
         decisions: volume.sliceDecisions,
+        mergeSources: volume.mergeSources,
       },
     },
   });
@@ -245,6 +270,7 @@ export const useStore = create<WorkstationState>((set, get) => {
       loadError: null,
       pendingImport: null,
       pendingPatch: null,
+      pendingReviewMerge: null,
       lastUpdate: null,
       slices: session.slices,
       cursorIJK: session.cursorIJK,
@@ -272,7 +298,10 @@ export const useStore = create<WorkstationState>((set, get) => {
     loadError: null,
     pendingImport: null,
     pendingPatch: null,
+    pendingReviewMerge: null,
     lastUpdate: null,
+    lastMerge: null,
+    reviewBranches: initialDoc.reviewBranches ?? {},
     slices: [0, 0, 0],
     cursorIJK: null,
     measurements: [],
@@ -464,10 +493,224 @@ export const useStore = create<WorkstationState>((set, get) => {
       });
     },
 
-    confirmMeasurement: (id) => {
-      const next = get().measurements.map((m) =>
-        m.id === id ? { ...m, review: 'confirmed' as const } : m,
+    saveReviewSide: (side, label) => {
+      const { volume, doc, slices, cursorIJK, measurements } = get();
+      if (!volume) return;
+      const branchId = `${volume.id}#review-${side}`;
+      const branchVolume: Volume = { ...volume, id: branchId, label };
+      const { frames, frameAcquisitions } = framesFromVolume(branchVolume);
+      let nextDoc = persistImport(doc, branchVolume, frames, label, branchVolume.window, frameAcquisitions);
+      nextDoc = {
+        ...nextDoc,
+        lastDatasetId: branchId,
+        reviewBranches: { ...(nextDoc.reviewBranches ?? {}), [side]: { id: branchId, label } },
+        sessions: {
+          ...nextDoc.sessions,
+          [branchId]: { slices, cursorIJK, measurements },
+        },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({
+        doc: nextDoc,
+        volume: branchVolume,
+        reviewBranches: nextDoc.reviewBranches ?? {},
+        pendingPatch: null,
+        pendingReviewMerge: null,
+        loadError: null,
+      });
+    },
+
+    openReviewSide: (side) => {
+      const branch = get().reviewBranches[side];
+      if (!branch) return;
+      const nextDoc = { ...get().doc, lastDatasetId: branch.id };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      useStore.setState({ doc: nextDoc });
+      restoreLastSession();
+    },
+
+    requestReviewMerge: () => {
+      const { doc, reviewBranches, pendingReviewMerge } = get();
+      const branchA = reviewBranches.a;
+      const branchB = reviewBranches.b;
+      const persistedA = branchA ? doc.imports[branchA.id] : undefined;
+      const persistedB = branchB ? doc.imports[branchB.id] : undefined;
+      if (!branchA || !branchB || !persistedA || !persistedB) {
+        set({ loadError: ['需要先保存 A、B 两份独立审阅，才能开始合并'] });
+        return;
+      }
+      const framesA = persistedA.frames.map((f) => ({
+        rows: f.rows,
+        cols: f.cols,
+        rowSpacing: f.rowSpacing,
+        colSpacing: f.colSpacing,
+        imagePositionPatient: f.imagePositionPatient,
+        imageOrientationPatient: f.imageOrientationPatient,
+        pixelData: Float32Array.from(f.pixels),
+        sourceName: f.sourceName,
+      }));
+      const framesB = persistedB.frames.map((f) => ({
+        rows: f.rows,
+        cols: f.cols,
+        rowSpacing: f.rowSpacing,
+        colSpacing: f.colSpacing,
+        imagePositionPatient: f.imagePositionPatient,
+        imageOrientationPatient: f.imageOrientationPatient,
+        pixelData: Float32Array.from(f.pixels),
+        sourceName: f.sourceName,
+      }));
+      const analysisA = analyzeFrameImport(framesA);
+      const analysisB = analyzeFrameImport(framesB);
+      if (!analysisA.ok || !analysisB.ok) {
+        set({ loadError: ['来源审阅无法重建：影像帧保存不完整或导入判定失效'] });
+        return;
+      }
+      const rebuiltA = buildVolumeFromAnalysis(framesA, persistedA.label, persistedA.window, analysisA);
+      const rebuiltB = buildVolumeFromAnalysis(framesB, persistedB.label, persistedB.window, analysisB);
+      const volumeA: Volume = {
+        ...rebuiltA,
+        id: branchA.id,
+        sliceManifest: persistedA.manifest ?? rebuiltA.sliceManifest,
+        acquisitions: persistedA.acquisitions ?? rebuiltA.acquisitions,
+        sliceDecisions: persistedA.decisions ?? rebuiltA.sliceDecisions,
+      };
+      const volumeB: Volume = {
+        ...rebuiltB,
+        id: branchB.id,
+        sliceManifest: persistedB.manifest ?? rebuiltB.sliceManifest,
+        acquisitions: persistedB.acquisitions ?? rebuiltB.acquisitions,
+        sliceDecisions: persistedB.decisions ?? rebuiltB.sliceDecisions,
+      };
+      const previousChoices = pendingReviewMerge?.choices ?? {};
+      const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
+      set({
+        pendingReviewMerge: { analysis, choices: { ...previousChoices } },
+        loadError: null,
+      });
+    },
+
+    setReviewMergeChoice: (layer, side) => {
+      const pending = get().pendingReviewMerge;
+      if (!pending) return;
+      const choices = { ...pending.choices, [layer]: side };
+      const layers = pending.analysis.layers.map((item) => ({
+        ...item,
+        selected: item.layer === layer ? side : item.selected,
+      }));
+      set({ pendingReviewMerge: { analysis: {
+        ...pending.analysis,
+        layers,
+        unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
+      }, choices } });
+    },
+
+    confirmReviewMerge: () => {
+      const state = get();
+      const pending = state.pendingReviewMerge;
+      const branchA = state.reviewBranches.a;
+      const branchB = state.reviewBranches.b;
+      if (!pending || !branchA || !branchB) return;
+      const persistedA = state.doc.imports[branchA.id];
+      const persistedB = state.doc.imports[branchB.id];
+      if (!persistedA || !persistedB) return;
+      state.requestReviewMerge();
+      const prepared = get().pendingReviewMerge;
+      if (!prepared || prepared.analysis.unresolvedLayers.length > 0) {
+        set({
+          pendingReviewMerge: pending,
+          loadError: [`仍有未处理冲突层：${(prepared?.analysis.unresolvedLayers ?? pending.analysis.unresolvedLayers).map((k) => k + 1).join('、')}`],
+        });
+        return;
+      }
+      const framesA = persistedA.frames.map((f) => ({ ...f, pixelData: Float32Array.from(f.pixels) }));
+      const framesB = persistedB.frames.map((f) => ({ ...f, pixelData: Float32Array.from(f.pixels) }));
+      const baseA = buildVolumeFromAnalysis(framesA, persistedA.label, persistedA.window, analyzeFrameImport(framesA));
+      const baseB = buildVolumeFromAnalysis(framesB, persistedB.label, persistedB.window, analyzeFrameImport(framesB));
+      const volumeA: Volume = { ...baseA, id: branchA.id, sliceManifest: persistedA.manifest, acquisitions: persistedA.acquisitions, sliceDecisions: persistedA.decisions };
+      const volumeB: Volume = { ...baseB, id: branchB.id, sliceManifest: persistedB.manifest, acquisitions: persistedB.acquisitions, sliceDecisions: persistedB.decisions };
+      const mergedId = `merge:${branchA.id}|${branchB.id}`;
+      const mergeLabel = '合并采集版本';
+      const result = applyReviewMerge(volumeA, volumeB, prepared.analysis, mergeLabel, volumeA.window, mergedId);
+      const results = mergeMeasurements(
+        result.volume,
+        volumeA,
+        state.doc.sessions[branchA.id]?.measurements ?? [],
+        volumeB,
+        state.doc.sessions[branchB.id]?.measurements ?? [],
       );
+      const mergedMeasurements = results.map((item) => item.measurement);
+      const { frames, frameAcquisitions } = framesFromVolume(result.volume);
+      let nextDoc = persistImport(state.doc, result.volume, frames, mergeLabel, result.volume.window, frameAcquisitions);
+      const session: DatasetSession = {
+        slices: [0, 0, 0],
+        cursorIJK: null,
+        measurements: mergedMeasurements,
+      };
+      nextDoc = {
+        ...nextDoc,
+        lastDatasetId: result.volume.id,
+        sessions: { ...nextDoc.sessions, [result.volume.id]: session },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({
+        doc: nextDoc,
+        volume: result.volume,
+        measurements: mergedMeasurements,
+        slices: session.slices,
+        cursorIJK: null,
+        pendingReviewMerge: null,
+        pendingPatch: null,
+        lastMerge: {
+          volume: volumeB,
+          measurements: state.doc.sessions[branchB.id]?.measurements ?? [],
+          doc: { ...state.doc, lastDatasetId: branchB.id },
+        },
+        loadError: null,
+      });
+    },
+
+    cancelReviewMerge: () => set({ pendingReviewMerge: null, loadError: null }),
+
+    undoReviewMerge: () => {
+      const { lastMerge } = get();
+      if (!lastMerge) return;
+      const { volume, measurements, doc } = lastMerge;
+      const session: DatasetSession = {
+        slices: [
+          clampSlice(get().slices[0], volume.dimensions[0]),
+          clampSlice(get().slices[1], volume.dimensions[1]),
+          clampSlice(get().slices[2], volume.dimensions[2]),
+        ],
+        cursorIJK: get().cursorIJK,
+        measurements,
+      };
+      const nextDoc = { ...doc, sessions: { ...doc.sessions, [volume.id]: session } };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({
+        doc: nextDoc,
+        volume,
+        measurements,
+        slices: session.slices,
+        lastMerge: null,
+        pendingReviewMerge: null,
+        pendingPatch: null,
+        loadError: null,
+      });
+    },
+
+    confirmMeasurement: (id) => {
+      const { volume } = get();
+      const next = get().measurements.map((m) => {
+        if (m.id !== id) return m;
+        const basisSlices = volume ? buildMeasurementBasis(volume, m) : m.basisSlices;
+        return {
+          ...m,
+          review: 'confirmed' as const,
+          basisLayers: basisSlices?.map((item) => item.layer) ?? m.basisLayers,
+          basisSlices,
+          basisAcquisition: volume?.acquisitions?.[volume.acquisitions.length - 1]?.id ?? m.basisAcquisition,
+        };
+      });
       set({ measurements: next });
       persistSession({ measurements: next });
     },
@@ -509,8 +752,9 @@ export const useStore = create<WorkstationState>((set, get) => {
         distance: Math.sqrt(dx * dx + dy * dy + dz * dz),
         createdAt: Date.now(),
         // 记录测量所依据的采集版本，后续补片/替换片更新后可追溯
-        basisAcquisition:
-          volume.acquisitions?.[volume.acquisitions.length - 1]?.id ?? undefined,
+        basisAcquisition: volume.acquisitions?.[volume.acquisitions.length - 1]?.id ?? undefined,
+        basisLayers: buildMeasurementBasis(volume, { p1: draftPoint, p2: world }).map((item) => item.layer),
+        basisSlices: buildMeasurementBasis(volume, { p1: draftPoint, p2: world }),
         review: 'confirmed',
       };
       const next = [...measurements, measurement];
@@ -560,6 +804,7 @@ export function restoreLastSession() {
             sliceManifest: persisted.manifest ?? volume.sliceManifest,
             acquisitions: persisted.acquisitions ?? volume.acquisitions,
             sliceDecisions: persisted.decisions ?? volume.sliceDecisions,
+            mergeSources: persisted.mergeSources ?? volume.mergeSources,
           };
           useStore.setState({ volume: restored });
           if (restored.id !== volume.id) {

@@ -352,7 +352,7 @@ export function measurementRangeStatus(
     const k = Math.round(ijk[2]);
     if (k >= 0 && k < nz) {
       const slot = volume.sliceManifest?.[k];
-      if (slot && slot.status === 'missing') return 'on-missing';
+      if (slot && slot.status !== 'adopted') return 'on-missing';
     }
   }
   return 'valid';
@@ -366,10 +366,12 @@ export function measurementAffectedByLayers(
 ): boolean {
   if (changedLayers.length === 0) return false;
   const changed = new Set(changedLayers);
-  for (const p of [m.p1, m.p2]) {
-    const ijk = worldToIjk(p, volume.origin, volume.direction, volume.spacing);
-    if (changed.has(Math.round(ijk[2]))) return true;
+  const k1 = worldToIjk(m.p1, volume.origin, volume.direction, volume.spacing)[2];
+  const k2 = worldToIjk(m.p2, volume.origin, volume.direction, volume.spacing)[2];
+  const start = Math.round(Math.min(k1, k2));
+  const end = Math.round(Math.max(k1, k2));
+  for (let k = start; k <= end; k += 1) {
+    if (changed.has(k)) return true;
   }
   return false;
 }
-

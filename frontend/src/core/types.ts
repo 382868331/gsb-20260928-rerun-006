@@ -38,13 +38,15 @@ export interface Volume {
   acquisitions?: AcquisitionInfo[];
   // 每个空间位置上候选切片的采用决定（含被拒绝的替换片）
   sliceDecisions?: SliceDecision[];
+  // 合并采集版本的两份来源审阅版本，用于撤回与重开比较
+  mergeSources?: { a: string; b: string };
 }
 
 // 体数据沿切片轴的一个槽位：已采用的切片或仍空缺（缺片）
 export interface SliceSlot {
   t: number; // 沿切片轴的患者坐标投影 (mm)
   layer: number; // 体数据层号 k
-  status: 'adopted' | 'missing';
+  status: 'adopted' | 'missing' | 'uncertain';
   sourceName: string | null;
   // 该层内容来自哪一版采集
   acquisition: string | null;
@@ -91,8 +93,19 @@ export interface Measurement {
   createdAt: number;
   // 测量所依据的采集版本 id（作出该测量时体数据的内容版本）
   basisAcquisition?: string;
+  // 测量实际跨越/使用的切片层；跨层测量不是只记录最后一个采集版本名
+  basisLayers?: number[];
+  // 每个实际使用切片的来源与像素指纹；重开后可核对当前影像是否仍是原依据
+  basisSlices?: MeasurementSliceBasis[];
   // 替换片改变了相关切片内容时进入待复核；未受影响保持 confirmed
   review?: 'confirmed' | 'pending';
+}
+
+export interface MeasurementSliceBasis {
+  layer: number;
+  sourceName: string | null;
+  acquisition: string | null;
+  hash: string;
 }
 
 export class VolumeBuildError extends Error {

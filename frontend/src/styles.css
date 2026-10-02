@@ -157,6 +157,11 @@ button.active { background: #1f6feb; border-color: #1f6feb; }
 }
 .modal h2 { font-size: 15px; margin: 0 0 8px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.modal-wide { width: min(1100px, 96vw); }
+.merge-summary { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0; font-size: 12px; }
+.merge-table { max-height: 50vh; }
+.merge-table td { white-space: normal; max-width: 260px; }
+.row-unresolved { background: rgba(255, 217, 61, 0.08); }
 
 .preview-bars { margin: 10px 0; }
 .preview-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
