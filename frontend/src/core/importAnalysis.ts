@@ -1,5 +1,6 @@
 import type { AcquisitionInfo, ImageFrame, ImportInfo, SliceDecision, SliceSlot, Volume } from './types';
 import { buildVolumeFromFrames, buildVolumeFromSlots, type VolumeSlot } from './series';
+import { frameContentHash, frameGeometryHash } from './patch';
 import { cross, directionLabel, dot, EPS, norm } from './geometry';
 
 function basicFrameReasons(frames: ImageFrame[]): string[] {
@@ -311,12 +312,15 @@ export function buildVolumeFromAnalysis(
   for (let k = 0; k < volume.dimensions[2]; k += 1) {
     const placement = analysis.placements.find((p) => p.layer === k);
     const t = t0 + k * spacing;
+    const frame = placement ? frames[placement.sourceIndex] : null;
     sliceManifest.push({
       t,
       layer: k,
       status: placement ? 'adopted' : 'missing',
       sourceName: placement ? names[placement.sourceIndex] : null,
       acquisition: placement ? INITIAL_ACQUISITION : null,
+      contentHash: frame ? frameContentHash(frame) : undefined,
+      geometryHash: frame ? frameGeometryHash(frame) : undefined,
     });
     sliceDecisions.push({
       t,

@@ -2,18 +2,22 @@ import { create } from 'zustand';
 import type {
   AcquisitionInfo,
   Measurement,
+  ReviewBranch,
   SliceDecision,
   SliceSlot,
   Vec3,
   Volume,
   ImageFrame,
 } from '../core/types';
+import { analyzeReviewMerge, mergeReviews, withdrawMergeResolution } from '../core/reviewMerge';
 import { buildVolumeFromFrames } from '../core/series';
 import { analyzeFrameImport, buildVolumeFromAnalysis, type ImportAnalysis } from '../core/importAnalysis';
 import {
   analyzePatch,
   applyPatch,
-  measurementAffectedByLayers,
+  measurementBasisLayers,
+  measurementBasisStillAdopted,
+  measurementRangeStatus,
   type PatchAnalysis,
 } from '../core/patch';
 import { worldToIjk } from '../core/geometry';
@@ -54,14 +58,25 @@ interface PersistedImport {
   manifest?: SliceSlot[];
   acquisitions?: AcquisitionInfo[];
   decisions?: SliceDecision[];
+  reviewState?: Volume['reviewState'];
+}
+
+interface PersistedReviewBranch {
+  id: string;
+  label: string;
+  baseAcquisitionId: string;
+  storageImportId: string;
+  measurements: Measurement[];
+  createdAt: number;
 }
 
 interface PersistedDoc {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   sessions: Record<string, DatasetSession>;
   lastDatasetId: string | null;
   // 数据集 id -> 原始帧来源（重开时按原帧重新分析、组卷，保留导入判定）
   imports: Record<string, PersistedImport>;
+  reviews?: Record<string, PersistedReviewBranch>;
 }
 
 const STORAGE_KEY = 'medical-workstation-v1';
@@ -71,15 +86,15 @@ function loadDoc(): PersistedDoc {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const doc = JSON.parse(raw) as PersistedDoc;
-      if ((doc.version === 1 || doc.version === 2) && doc.sessions) {
+      if ((doc.version === 1 || doc.version === 2 || doc.version === 3) && doc.sessions) {
         // 旧版本存档可能没有 imports 字段
-        return { ...doc, version: 2, imports: doc.imports ?? {} };
+        return { ...doc, version: 3, imports: doc.imports ?? {}, reviews: doc.reviews ?? {} };
       }
     }
   } catch {
     // 损坏的持久化文件不应导致应用崩溃
   }
-  return { version: 2, sessions: {}, lastDatasetId: null, imports: {} };
+  return { version: 3, sessions: {}, lastDatasetId: null, imports: {}, reviews: {} };
 }
 
 function defaultSlices(volume: Volume): SliceTriple {
@@ -109,6 +124,12 @@ interface WorkstationState {
     frames: ImageFrame[];
     choices: Record<number, boolean>;
   } | null;
+  pendingMerge: {
+    branchA: ReviewBranch;
+    branchB: ReviewBranch;
+    resolutions: Record<number, 'a' | 'b'>;
+  } | null;
+  reviewBranches: Record<string, ReviewBranch>;
   // 最近一次补片更新前的快照（撤销更新时回到原体数据与测量状态）
   lastUpdate: { volume: Volume; measurements: Measurement[]; doc: PersistedDoc } | null;
   slices: SliceTriple;
@@ -131,6 +152,13 @@ interface WorkstationState {
   cancelPatch: () => void;
   // 撤销最近一次补片更新，回到更新前的体数据与测量状态
   undoPatch: () => void;
+  createReviewBranch: (id: string, label: string) => void;
+  openReviewBranch: (id: string) => void;
+  requestMergeReviews: (aId: string, bId: string) => void;
+  setMergeResolution: (layer: number, side: 'a' | 'b') => void;
+  confirmMergeReviews: (label?: string) => void;
+  cancelMerge: () => void;
+  withdrawMergedLayer: (layer: number) => void;
   // 复核确认：替换片更新后处于待复核的测量由用户重新确认
   confirmMeasurement: (id: string) => void;
   setSlice: (axis: 0 | 1 | 2, slice: number) => void;
@@ -157,6 +185,7 @@ function ijkFromWorld(volume: Volume, world: Vec3): [number, number, number] {
 
 export const useStore = create<WorkstationState>((set, get) => {
   const initialDoc = loadDoc();
+  const reviewStorageId = (id: string) => `review:${id}`;
 
   const toPersistedFrames = (frames: ImageFrame[], acquisitions?: Array<string | null>): PersistedFrame[] =>
     frames.map((f, i) => ({
@@ -197,6 +226,7 @@ export const useStore = create<WorkstationState>((set, get) => {
         manifest: volume.sliceManifest,
         acquisitions: volume.acquisitions,
         decisions: volume.sliceDecisions,
+        reviewState: volume.reviewState,
       },
     },
   });
@@ -272,6 +302,8 @@ export const useStore = create<WorkstationState>((set, get) => {
     loadError: null,
     pendingImport: null,
     pendingPatch: null,
+    pendingMerge: null,
+    reviewBranches: {},
     lastUpdate: null,
     slices: [0, 0, 0],
     cursorIJK: null,
@@ -376,12 +408,13 @@ export const useStore = create<WorkstationState>((set, get) => {
         const result = applyPatch(volume, frames, analysis, choices, label);
         const nextVolume = result.volume;
         // 替换/补片改变了可见内容的层：相关测量进入待复核；未受影响保持原确认
+        const changed = new Set(result.changedLayers);
         const nextMeasurements = measurements.map((m) => {
-          if (m.review === 'pending') return m;
-          if (measurementAffectedByLayers(nextVolume, m, result.changedLayers)) {
+          const touchesChanged = (m.basisLayers ?? []).some((b) => changed.has(b.layer));
+          if (touchesChanged || !measurementBasisStillAdopted(nextVolume, m)) {
             return { ...m, review: 'pending' as const };
           }
-          return m;
+          return { ...m, basisLayers: measurementBasisLayers(nextVolume, m) };
         });
         const { frames: adoptedFrames, frameAcquisitions } = framesFromVolume(nextVolume);
         let nextDoc = persistImport(
@@ -464,10 +497,142 @@ export const useStore = create<WorkstationState>((set, get) => {
       });
     },
 
-    confirmMeasurement: (id) => {
-      const next = get().measurements.map((m) =>
-        m.id === id ? { ...m, review: 'confirmed' as const } : m,
+    createReviewBranch: (id, label) => {
+      const { volume, measurements, doc } = get();
+      if (!volume) {
+        set({ loadError: ['尚未打开采集版本，无法创建独立审阅分支'] });
+        return;
+      }
+      const branch: ReviewBranch = {
+        id,
+        label,
+        baseAcquisitionId: volume.acquisitions?.[0]?.id ?? 'acq-1',
+        volume: { ...volume, data: Float32Array.from(volume.data) },
+        measurements: measurements.map((m) => ({ ...m, basisLayers: m.basisLayers?.map((b) => ({ ...b })) })),
+        createdAt: Date.now(),
+      };
+      const { frames, frameAcquisitions } = framesFromVolume(branch.volume);
+      let nextDoc = persistImport(
+        doc,
+        { ...branch.volume, id: reviewStorageId(id) },
+        frames,
+        branch.volume.label,
+        branch.volume.window,
+        frameAcquisitions,
       );
+      const persistedBranch: PersistedReviewBranch = {
+        id,
+        label,
+        baseAcquisitionId: branch.baseAcquisitionId,
+        storageImportId: reviewStorageId(id),
+        measurements: branch.measurements,
+        createdAt: branch.createdAt,
+      };
+      nextDoc = { ...nextDoc, reviews: { ...(nextDoc.reviews ?? {}), [id]: persistedBranch } };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({ doc: nextDoc, reviewBranches: { ...get().reviewBranches, [id]: branch } });
+    },
+
+    openReviewBranch: (id) => {
+      const existing = get().reviewBranches[id];
+      if (existing) {
+        set({ volume: existing.volume, measurements: existing.measurements });
+        return;
+      }
+      set({ loadError: [`审阅分支 ${id} 不存在`] });
+    },
+
+    requestMergeReviews: (aId, bId) => {
+      const branchA = get().reviewBranches[aId];
+      const branchB = get().reviewBranches[bId];
+      if (!branchA || !branchB) {
+        set({ loadError: ['两份审阅分支都必须先独立保存，才能合并'] });
+        return;
+      }
+      const analysis = analyzeReviewMerge(branchA.volume, branchB.volume);
+      const autoResolutions = Object.fromEntries(
+        analysis.items.filter((i) => i.resolution).map((i) => [i.layer, i.resolution!]),
+      );
+      set({ pendingMerge: { branchA, branchB, resolutions: autoResolutions }, loadError: null });
+    },
+
+    setMergeResolution: (layer, side) => {
+      const pending = get().pendingMerge;
+      if (!pending) return;
+      set({
+        pendingMerge: {
+          ...pending,
+          resolutions: { ...pending.resolutions, [layer]: side },
+        },
+      });
+    },
+
+    confirmMergeReviews: (label) => {
+      const { pendingMerge, doc } = get();
+      if (!pendingMerge) return;
+      const result = mergeReviews(pendingMerge.branchA, pendingMerge.branchB, {
+        label,
+        resolutions: pendingMerge.resolutions,
+      });
+      if (result.analysis.unresolvedLayers.length > 0) return;
+      const { frames, frameAcquisitions } = framesFromVolume(result.volume);
+      let nextDoc = persistImport(
+        doc,
+        result.volume,
+        frames,
+        result.volume.label,
+        result.volume.window,
+        frameAcquisitions,
+      );
+      const session = { slices: [0, 0, 0] as SliceTriple, cursorIJK: null, measurements: result.measurements };
+      nextDoc = {
+        ...nextDoc,
+        lastDatasetId: result.volume.id,
+        sessions: { ...nextDoc.sessions, [result.volume.id]: session },
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({
+        doc: nextDoc,
+        volume: result.volume,
+        measurements: result.measurements,
+        slices: session.slices,
+        cursorIJK: null,
+        pendingMerge: null,
+      });
+    },
+
+    cancelMerge: () => set({ pendingMerge: null }),
+
+    withdrawMergedLayer: (layer) => {
+      const { volume, measurements, doc } = get();
+      if (!volume?.reviewState?.mergedFrom) return;
+      const restored = withdrawMergeResolution(volume, measurements, layer);
+      const { frames, frameAcquisitions } = framesFromVolume(restored.volume);
+      const nextDoc = persistImport(
+        doc,
+        restored.volume,
+        frames,
+        restored.volume.label,
+        restored.volume.window,
+        frameAcquisitions,
+      );
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      set({ doc: nextDoc, volume: restored.volume, measurements: restored.measurements });
+    },
+
+    confirmMeasurement: (id) => {
+      const { volume } = get();
+      const next = get().measurements.map((m) => {
+        if (m.id !== id) return m;
+        if (!volume || measurementRangeStatus(volume, m) !== 'valid') {
+          return { ...m, review: 'pending' as const };
+        }
+        return {
+          ...m,
+          review: 'confirmed' as const,
+          basisLayers: measurementBasisLayers(volume, m),
+        };
+      });
       set({ measurements: next });
       persistSession({ measurements: next });
     },
@@ -513,6 +678,7 @@ export const useStore = create<WorkstationState>((set, get) => {
           volume.acquisitions?.[volume.acquisitions.length - 1]?.id ?? undefined,
         review: 'confirmed',
       };
+      measurement.basisLayers = measurementBasisLayers(volume, measurement);
       const next = [...measurements, measurement];
       set({ measurements: next, draftPoint: null });
       persistSession({ measurements: next });
@@ -528,67 +694,68 @@ export const useStore = create<WorkstationState>((set, get) => {
   };
 });
 
+function restorePersistedVolume(persisted: PersistedImport): Volume | null {
+  const frames: ImageFrame[] = persisted.frames.map((f) => ({
+    rows: f.rows,
+    cols: f.cols,
+    rowSpacing: f.rowSpacing,
+    colSpacing: f.colSpacing,
+    imagePositionPatient: f.imagePositionPatient,
+    imageOrientationPatient: f.imageOrientationPatient,
+    pixelData: Float32Array.from(f.pixels),
+    sourceName: f.sourceName,
+  }));
+  const analysis = analyzeFrameImport(frames);
+  if (!analysis.ok) return null;
+  const rebuilt = buildVolumeFromAnalysis(frames, persisted.label, persisted.window, analysis);
+  return {
+    ...rebuilt,
+    id: persisted.id ?? rebuilt.id,
+    sliceManifest: persisted.manifest ?? rebuilt.sliceManifest,
+    acquisitions: persisted.acquisitions ?? rebuilt.acquisitions,
+    sliceDecisions: persisted.decisions ?? rebuilt.sliceDecisions,
+    reviewState: persisted.reviewState,
+  };
+}
+
 export function restoreLastSession() {
   const { doc, openPhantom } = useStore.getState();
   if (!doc.lastDatasetId) return;
   const persisted = doc.imports[doc.lastDatasetId];
   if (persisted) {
-    // 用保存的原始帧重新走分析 + 组卷，几何与 id 稳定，导入判定与来源一并恢复
-    const frames: ImageFrame[] = persisted.frames.map((f) => ({
-      rows: f.rows,
-      cols: f.cols,
-      rowSpacing: f.rowSpacing,
-      colSpacing: f.colSpacing,
-      imagePositionPatient: f.imagePositionPatient,
-      imageOrientationPatient: f.imageOrientationPatient,
-      pixelData: Float32Array.from(f.pixels),
-      sourceName: f.sourceName,
-    }));
-    const analysis = analyzeFrameImport(frames);
-    if (analysis.ok) {
-      useStore.setState({
-        pendingImport: { analysis, label: persisted.label, window: persisted.window, frames },
-      });
-      useStore.getState().confirmImport();
-      // 恢复补片/替换片后的状态：稳定 id、每层采用清单、采集批次与采用决定
-      if (persisted.manifest || persisted.id) {
-        const volume = useStore.getState().volume;
-        if (volume) {
-          const restored: Volume = {
-            ...volume,
-            id: persisted.id ?? volume.id,
-            sliceManifest: persisted.manifest ?? volume.sliceManifest,
-            acquisitions: persisted.acquisitions ?? volume.acquisitions,
-            sliceDecisions: persisted.decisions ?? volume.sliceDecisions,
+    const restored = restorePersistedVolume(persisted);
+    if (restored) {
+      const session = doc.sessions[restored.id] ?? {
+        slices: [0, 0, 0] as SliceTriple,
+        cursorIJK: null,
+        measurements: [] as Measurement[],
+      };
+      const reviewBranches: Record<string, ReviewBranch> = {};
+      for (const meta of Object.values(doc.reviews ?? {})) {
+        const branchVolume = restorePersistedVolume(doc.imports[meta.storageImportId]);
+        if (branchVolume) {
+          reviewBranches[meta.id] = {
+            id: meta.id,
+            label: meta.label,
+            baseAcquisitionId: meta.baseAcquisitionId,
+            volume: branchVolume,
+            measurements: meta.measurements,
+            createdAt: meta.createdAt,
           };
-          useStore.setState({ volume: restored });
-          if (restored.id !== volume.id) {
-            // id 被恢复为补片前的稳定 id：把会话与导入记录挂回稳定 id
-            const state = useStore.getState();
-            // 稳定 id 下已保存的会话（含测量）优先；其次才是刚按重算 id 建的空会话
-            const session =
-              state.doc.sessions[restored.id] ??
-              state.doc.sessions[volume.id] ?? {
-                slices: state.slices,
-                cursorIJK: state.cursorIJK,
-                measurements: state.measurements,
-              };
-            const nextDoc: PersistedDoc = {
-              ...state.doc,
-              lastDatasetId: restored.id,
-              sessions: { ...state.doc.sessions, [restored.id]: session },
-            };
-            delete (nextDoc.sessions as Record<string, unknown>)[volume.id];
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
-            useStore.setState({
-              doc: nextDoc,
-              slices: session.slices,
-              cursorIJK: session.cursorIJK,
-              measurements: session.measurements,
-            });
-          }
         }
       }
+      const nextDoc: PersistedDoc = { ...doc, lastDatasetId: restored.id };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      useStore.setState({
+        doc: nextDoc,
+        volume: restored,
+        pendingImport: null,
+        pendingPatch: null,
+        slices: session.slices,
+        cursorIJK: session.cursorIJK,
+        measurements: session.measurements,
+        reviewBranches,
+      });
       return;
     }
   }

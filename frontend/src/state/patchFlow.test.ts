@@ -19,6 +19,8 @@ function reset() {
     loadError: null,
     pendingImport: null,
     pendingPatch: null,
+    pendingMerge: null,
+    reviewBranches: {},
     lastUpdate: null,
     slices: [0, 0, 0],
     cursorIJK: null,
@@ -160,3 +162,54 @@ describe('补片/替换片工作流', () => {
   });
 });
 
+describe('双审阅合并持久化', () => {
+  it('保存重开后每个沿用测量都能指出实际使用的切片集合', () => {
+    const base = openGapped();
+    const fill = buildPatchBatch(def, 'fill');
+    useStore.getState().requestPatch(fill.frames, fill.label);
+    useStore.getState().confirmPatch();
+    measureOnLayers([2, 2, 2], [5, 5, 10]);
+    expect(useStore.getState().measurements[0].basisLayers?.map((b) => b.layer))
+      .toEqual([2, 3, 4, 5, 6, 7, MISSING_K, 9, 10]);
+
+    useStore.getState().createReviewBranch('review-a', '审阅 A');
+    expect(useStore.getState().reviewBranches['review-a']).toBeTruthy();
+    void base;
+
+    const replace = buildPatchBatch(def, 'replace');
+    useStore.getState().requestPatch(replace.frames, '审阅 B 替换');
+    for (const assessment of useStore.getState().pendingPatch!.analysis.assessments) {
+      useStore.getState().setPatchChoice(assessment.sourceIndex, true);
+    }
+    useStore.getState().confirmPatch();
+    useStore.getState().createReviewBranch('review-b', '审阅 B');
+
+    useStore.getState().requestMergeReviews('review-a', 'review-b');
+    const pending = useStore.getState().pendingMerge!;
+    expect([3, 11].every((layer) => !pending.resolutions[layer])).toBe(true);
+    useStore.getState().setMergeResolution(3, 'a');
+    useStore.getState().setMergeResolution(11, 'b');
+    useStore.getState().confirmMergeReviews();
+    expect(useStore.getState().pendingMerge).toBeNull();
+    expect(useStore.getState().measurements[0].review).toBe('confirmed');
+    expect(useStore.getState().measurements[0].basisLayers?.map((b) => b.layer))
+      .toEqual([2, 3, 4, 5, 6, 7, MISSING_K, 9, 10]);
+
+    useStore.setState({
+      volume: null,
+      pendingImport: null,
+      pendingPatch: null,
+      pendingMerge: null,
+      reviewBranches: {},
+      slices: [0, 0, 0],
+      cursorIJK: null,
+      measurements: [],
+    });
+    restoreLastSession();
+    const restored = useStore.getState();
+    expect(restored.measurements[0].review).toBe('confirmed');
+    expect(restored.measurements[0].basisLayers?.map((b) => b.layer))
+      .toEqual([2, 3, 4, 5, 6, 7, MISSING_K, 9, 10]);
+    expect(restored.volume?.reviewState?.mergedFrom?.reviewIds).toEqual(['review-a', 'review-b']);
+  });
+});

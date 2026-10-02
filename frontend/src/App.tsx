@@ -3,6 +3,7 @@ import { useStore, restoreLastSession } from './state/store';
 import { MprView } from './components/MprView';
 import { ImportPreview } from './components/ImportPreview';
 import { PatchPreview } from './components/PatchPreview';
+import { MergePreview } from './components/MergePreview';
 import { SLICE_PLANES } from './core/slices';
 import { PHANTOM_CATALOG, buildFaultyFrames, buildPatchBatch, type PatchMode } from './core/phantom';
 import { ijkToWorld } from './core/geometry';
@@ -19,6 +20,10 @@ export default function App() {
   const openPhantom = useStore((s) => s.openPhantom);
   const requestImport = useStore((s) => s.requestImport);
   const requestPatch = useStore((s) => s.requestPatch);
+  const createReviewBranch = useStore((s) => s.createReviewBranch);
+  const openReviewBranch = useStore((s) => s.openReviewBranch);
+  const requestMergeReviews = useStore((s) => s.requestMergeReviews);
+  const withdrawMergedLayer = useStore((s) => s.withdrawMergedLayer);
   const undoPatch = useStore((s) => s.undoPatch);
   const confirmMeasurement = useStore((s) => s.confirmMeasurement);
   const toggleMeasureMode = useStore((s) => s.toggleMeasureMode);
@@ -86,6 +91,21 @@ export default function App() {
           <button onClick={() => receivePatch('mixed')} disabled={!volume}>
             接收混合补片包
           </button>
+          <button onClick={() => createReviewBranch('review-a', '审阅 A')} disabled={!volume}>
+            保存审阅 A
+          </button>
+          <button onClick={() => createReviewBranch('review-b', '审阅 B')} disabled={!volume}>
+            保存审阅 B
+          </button>
+          <button onClick={() => requestMergeReviews('review-a', 'review-b')}>
+            合并 A/B 审阅
+          </button>
+          <button onClick={() => openReviewBranch('review-a')}>
+            重开审阅 A
+          </button>
+          <button onClick={() => openReviewBranch('review-b')}>
+            重开审阅 B
+          </button>
           {lastUpdate && (
             <button className="danger" onClick={undoPatch}>
               撤销更新
@@ -115,6 +135,7 @@ export default function App() {
 
       <ImportPreview />
       <PatchPreview />
+      <MergePreview />
 
       {!volume ? (
         <div className="empty-state">
@@ -243,12 +264,23 @@ export default function App() {
                       ({m.p2.map((c) => c.toFixed(1)).join(', ')})
                     </div>
                     <div className="small">依据采集：{acquisitionLabel(m.basisAcquisition)}</div>
+                    <div className="small">
+                      实际切片：{m.basisLayers && m.basisLayers.length > 0
+                        ? m.basisLayers.map((b) => `第${b.layer + 1}层`).join('、')
+                        : '未记录'}
+                      {m.sourceReviewId ? ` · 来源：${m.sourceReviewId}` : ''}
+                    </div>
                   </div>
                   <div className="measure-actions">
                     {m.review === 'pending' && (
                       <button onClick={() => confirmMeasurement(m.id)}>复核确认</button>
                     )}
                     <button onClick={() => removeMeasurement(m.id)}>删除</button>
+                    {volume.reviewState?.mergedFrom && m.basisLayers?.map((b) => (
+                      <button key={b.layer} onClick={() => withdrawMergedLayer(b.layer)}>
+                        撤回第 {b.layer + 1} 层合并
+                      </button>
+                    ))}
                   </div>
                 </li>
               ))}

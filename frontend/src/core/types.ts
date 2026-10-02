@@ -38,6 +38,34 @@ export interface Volume {
   acquisitions?: AcquisitionInfo[];
   // 每个空间位置上候选切片的采用决定（含被拒绝的替换片）
   sliceDecisions?: SliceDecision[];
+  // 双审阅分支与合并结果的可追溯状态
+  reviewState?: ReviewState;
+}
+
+export interface ReviewBranch {
+  id: string;
+  label: string;
+  baseAcquisitionId: string;
+  volume: Volume;
+  measurements: Measurement[];
+  createdAt: number;
+}
+
+export interface MergeLayerResolution {
+  layer: number;
+  reviewId: string;
+  contentHash: string;
+  decidedAt: number;
+}
+
+export interface ReviewState {
+  baseAcquisitionId: string;
+  branches: Record<string, Omit<ReviewBranch, 'volume'>>;
+  mergedFrom?: { reviewIds: [string, string]; mergedAt: number };
+  resolutions?: MergeLayerResolution[];
+  withdrawnResolutions?: MergeLayerResolution[];
+  withdrawnLayers?: number[];
+  reopenedLayers?: number[];
 }
 
 // 体数据沿切片轴的一个槽位：已采用的切片或仍空缺（缺片）
@@ -48,6 +76,10 @@ export interface SliceSlot {
   sourceName: string | null;
   // 该层内容来自哪一版采集
   acquisition: string | null;
+  // 像素内容指纹；相同层号/名称但指纹不同不能视为同一依据
+  contentHash?: string;
+  // 几何指纹：尺寸、间距、方向、位置共同决定候选是否落在同一空间位置
+  geometryHash?: string;
 }
 
 export interface AcquisitionInfo {
@@ -91,8 +123,21 @@ export interface Measurement {
   createdAt: number;
   // 测量所依据的采集版本 id（作出该测量时体数据的内容版本）
   basisAcquisition?: string;
+  // 测量实际采样的切片集合；跨层直线测量会包含两个端点之间的所有整数层
+  basisLayers?: MeasurementSliceBasis[];
+  // 来源审阅分支；合并后的测量可追溯到任一份独立审阅
+  sourceReviewId?: string;
   // 替换片改变了相关切片内容时进入待复核；未受影响保持 confirmed
   review?: 'confirmed' | 'pending';
+}
+
+export interface MeasurementSliceBasis {
+  t: number;
+  layer: number;
+  contentHash: string;
+  geometryHash?: string;
+  sourceName: string | null;
+  acquisition: string | null;
 }
 
 export class VolumeBuildError extends Error {

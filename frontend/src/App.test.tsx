@@ -7,9 +7,14 @@ describe('应用集成', () => {
   beforeEach(() => {
     localStorage.clear();
     useStore.setState({
-      doc: { version: 1, sessions: {}, lastDatasetId: null, imports: {} },
+    doc: { version: 3, sessions: {}, lastDatasetId: null, imports: {} },
       volume: null,
       loadError: null,
+      pendingImport: null,
+      pendingPatch: null,
+      pendingMerge: null,
+      reviewBranches: {},
+      lastUpdate: null,
       slices: [0, 0, 0],
       cursorIJK: null,
       measurements: [],
