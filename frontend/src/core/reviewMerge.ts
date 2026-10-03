@@ -176,14 +176,13 @@ export function analyzeReviewMerge(
     } else if (a!.hash === b!.hash) {
       const sameProvenance = a!.frame.sourceName === b!.frame.sourceName &&
         a!.acquisition === b!.acquisition;
-      const independentlyAdopted = a!.acquisition !== b!.acquisition ||
-        a!.sourceName !== b!.sourceName;
-      const duplicate = sameProvenance || (!independentlyAdopted && a!.frame.sourceName === b!.frame.sourceName);
-      status = duplicate && !independentlyAdopted ? 'duplicate' : 'agreement';
+      // 共同来源（同一采集批次、同一来源文件）且内容一致：一致决定，直接沿用。
+      // 内容相同但来源/批次不同：双方各自导入了同一片，属真正重复导入，只保留一份。
+      status = sameProvenance ? 'agreement' : 'duplicate';
       selected = previousChoices[layer] === 'b' ? 'b' : 'a';
       reason = status === 'duplicate'
-        ? '相同补片被重复导入，只保留一份，不产生胜者'
-        : '两份审阅独立决定一致，像素内容相同';
+        ? '相同内容被双方独立重复导入，只保留一份，不产生胜者'
+        : '共同来源且内容一致，双方均未改动，直接沿用';
     } else {
       status = 'content-conflict';
       required = true;

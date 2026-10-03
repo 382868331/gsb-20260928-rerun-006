@@ -37,6 +37,7 @@ export function ReviewMergePreview() {
         <h2>合并两份独立审阅</h2>
         <p className="hint">
           合并版是独立采集版本；来源 A/B 不会被覆盖。方向、尺寸或位置争议与同位置不同像素必须逐层显式选择，未处理层保持不确定。
+          每个决定即选即存：关闭预览或关闭页面后再打开不会回到待定，提交后也可单独撤回某层另选，其他层决定不变。
         </p>
         <div className="merge-summary">
           {(Object.keys(STATUS_LABEL) as MergeLayerStatus[]).map((status) => (

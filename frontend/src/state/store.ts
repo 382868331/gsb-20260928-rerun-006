@@ -27,6 +27,7 @@ import {
   analyzeReviewMerge,
   applyReviewMerge,
   buildMeasurementBasis,
+  layerContent,
   mergeMeasurements,
   type ReviewMergeAnalysis,
   type ReviewSide,
@@ -72,6 +73,12 @@ interface PersistedDoc {
   // 数据集 id -> 原始帧来源（重开时按原帧重新分析、组卷，保留导入判定）
   imports: Record<string, PersistedImport>;
   reviewBranches?: Partial<Record<ReviewSide, { id: string; label: string }>>;
+  // 合并预览中已作出但未提交的逐层决定：关闭预览/关闭页面后仍需保留
+  reviewMergeChoices?: {
+    a: string;
+    b: string;
+    choices: Partial<Record<number, ReviewSide | null>>;
+  } | null;
 }
 
 const STORAGE_KEY = 'medical-workstation-v1';
@@ -500,9 +507,13 @@ export const useStore = create<WorkstationState>((set, get) => {
       const branchVolume: Volume = { ...volume, id: branchId, label };
       const { frames, frameAcquisitions } = framesFromVolume(branchVolume);
       let nextDoc = persistImport(doc, branchVolume, frames, label, branchVolume.window, frameAcquisitions);
+      // 分支内容被重新保存后，之前针对旧内容作出的合并决定失效，避免按过期选择自动定胜负
+      const savedChoices = nextDoc.reviewMergeChoices;
+      const invalidateChoices = savedChoices && (savedChoices.a === branchId || savedChoices.b === branchId);
       nextDoc = {
         ...nextDoc,
         lastDatasetId: branchId,
+        reviewMergeChoices: invalidateChoices ? null : (savedChoices ?? null),
         reviewBranches: { ...(nextDoc.reviewBranches ?? {}), [side]: { id: branchId, label } },
         sessions: {
           ...nextDoc.sessions,
@@ -581,7 +592,12 @@ export const useStore = create<WorkstationState>((set, get) => {
         acquisitions: persistedB.acquisitions ?? rebuiltB.acquisitions,
         sliceDecisions: persistedB.decisions ?? rebuiltB.sliceDecisions,
       };
-      const previousChoices = pendingReviewMerge?.choices ?? {};
+      // 未提交的决定优先取当前预览；预览已关闭时取上次保存（含关闭页面前）的决定
+      const saved = doc.reviewMergeChoices;
+      const savedChoices = saved && saved.a === branchA.id && saved.b === branchB.id
+        ? saved.choices
+        : {};
+      const previousChoices = pendingReviewMerge?.choices ?? savedChoices;
       const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
       set({
         pendingReviewMerge: { analysis, choices: { ...previousChoices } },
@@ -597,7 +613,21 @@ export const useStore = create<WorkstationState>((set, get) => {
         ...item,
         selected: item.layer === layer ? side : item.selected,
       }));
-      set({ pendingReviewMerge: { analysis: {
+      // 每个决定立即持久化：关闭预览或关闭页面后再次打开，决定不回到待定
+      const { doc, reviewBranches } = get();
+      let nextDoc = doc;
+      if (reviewBranches.a && reviewBranches.b) {
+        nextDoc = {
+          ...doc,
+          reviewMergeChoices: {
+            a: reviewBranches.a.id,
+            b: reviewBranches.b.id,
+            choices,
+          },
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      }
+      set({ doc: nextDoc, pendingReviewMerge: { analysis: {
         ...pending.analysis,
         layers,
         unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
@@ -638,7 +668,24 @@ export const useStore = create<WorkstationState>((set, get) => {
         volumeB,
         state.doc.sessions[branchB.id]?.measurements ?? [],
       );
-      const mergedMeasurements = results.map((item) => item.measurement);
+      // 重新合并（撤回某层并另选）时：之前已确认的测量，只有当其全部依据切片
+      // 在新合并版中逐层核对仍未变化时才保留确认；任一依据层内容改变即回到待复核。
+      const previousMerged = new Map(
+        (state.doc.sessions[mergedId]?.measurements ?? []).map((m) => [m.id, m]),
+      );
+      const mergedMeasurements = results.map((item) => {
+        const prev = previousMerged.get(item.measurement.id);
+        if (prev?.review === 'confirmed' && prev.basisSlices?.length) {
+          const stillValid = prev.basisSlices.every((ref) => {
+            const current = layerContent(result.volume, ref.layer);
+            return current !== null && current.hash === ref.hash;
+          });
+          if (stillValid) {
+            return { ...item.measurement, review: 'confirmed' as const, basisSlices: prev.basisSlices };
+          }
+        }
+        return item.measurement;
+      });
       const { frames, frameAcquisitions } = framesFromVolume(result.volume);
       let nextDoc = persistImport(state.doc, result.volume, frames, mergeLabel, result.volume.window, frameAcquisitions);
       const session: DatasetSession = {
@@ -649,6 +696,8 @@ export const useStore = create<WorkstationState>((set, get) => {
       nextDoc = {
         ...nextDoc,
         lastDatasetId: result.volume.id,
+        // 已提交的逐层决定同样保留：之后可单独撤回某层并另选，而不清空其他层
+        reviewMergeChoices: { a: branchA.id, b: branchB.id, choices: prepared.choices },
         sessions: { ...nextDoc.sessions, [result.volume.id]: session },
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
