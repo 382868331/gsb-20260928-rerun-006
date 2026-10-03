@@ -72,6 +72,8 @@ interface PersistedDoc {
   // 数据集 id -> 原始帧来源（重开时按原帧重新分析、组卷，保留导入判定）
   imports: Record<string, PersistedImport>;
   reviewBranches?: Partial<Record<ReviewSide, { id: string; label: string }>>;
+ // 未完成的合并逐层决定草稿：关闭预览或页面后重开继续，不清空已确认层
+  mergeDraft?: { a: string; b: string; choices: Partial<Record<number, ReviewSide | null>> } | null;
 }
 
 const STORAGE_KEY = 'medical-workstation-v1';
@@ -581,7 +583,11 @@ export const useStore = create<WorkstationState>((set, get) => {
         acquisitions: persistedB.acquisitions ?? rebuiltB.acquisitions,
         sliceDecisions: persistedB.decisions ?? rebuiltB.sliceDecisions,
       };
-      const previousChoices = pendingReviewMerge?.choices ?? {};
+      const draft = doc.mergeDraft;
+      const draftChoices = draft && draft.a === branchA.id && draft.b === branchB.id
+        ? draft.choices
+        : {};
+      const previousChoices = pendingReviewMerge?.choices ?? draftChoices;
       const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
       set({
         pendingReviewMerge: { analysis, choices: { ...previousChoices } },
@@ -597,11 +603,23 @@ export const useStore = create<WorkstationState>((set, get) => {
         ...item,
         selected: item.layer === layer ? side : item.selected,
       }));
-      set({ pendingReviewMerge: { analysis: {
-        ...pending.analysis,
-        layers,
-        unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
-      }, choices } });
+      // 每个决定立即持久化：可单独保留或撤回某一层，关闭预览/页面不影响其他已确认层
+      const { reviewBranches, doc } = get();
+      const branchAId = reviewBranches.a?.id;
+      const branchBId = reviewBranches.b?.id;
+      let nextDoc = doc;
+      if (branchAId && branchBId) {
+        nextDoc = { ...doc, mergeDraft: { a: branchAId, b: branchBId, choices } };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));
+      }
+      set({
+        doc: nextDoc,
+        pendingReviewMerge: { analysis: {
+          ...pending.analysis,
+          layers,
+          unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
+        }, choices },
+      });
     },
 
     confirmReviewMerge: () => {
@@ -649,6 +667,7 @@ export const useStore = create<WorkstationState>((set, get) => {
       nextDoc = {
         ...nextDoc,
         lastDatasetId: result.volume.id,
+        mergeDraft: null,
         sessions: { ...nextDoc.sessions, [result.volume.id]: session },
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));

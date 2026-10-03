@@ -68,7 +68,7 @@ function patchConflict(side: 'a' | 'b') {
 describe('两份独立审阅合并', () => {
   it('逐层分类冲突，未处理层保持不确定；依据切片仍被采用的跨层测量可沿用', () => {
     openGapped(`${def.label} A`);
-    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'a/fill.dcm', 210)], 'A 补缺');
+    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'shared/fill.dcm', 210)], 'A 补缺');
     useStore.getState().confirmPatch();
     measure(8, 11);
     patchConflict('a');
@@ -79,10 +79,11 @@ describe('两份独立审阅合并', () => {
     useStore.getState().saveReviewSide('a', '审阅 A');
 
     openGapped(`${def.label} B`);
-    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'b/fill.dcm', 210)], 'B 补缺');
-    useStore.getState().confirmPatch();
     measure(8, 11);
     patchConflict('b');
+    // B 在另一采集批次重复导入同一名称/内容的补片：与 A 的补缺构成真正重复导入
+    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'shared/fill.dcm', 210)], 'B 补缺');
+    useStore.getState().confirmPatch();
     while (useStore.getState().measurements.some((m) => m.review === 'pending')) {
       const pendingMeasurement = useStore.getState().measurements.find((m) => m.review === 'pending')!;
       useStore.getState().confirmMeasurement(pendingMeasurement.id);
@@ -96,9 +97,13 @@ describe('两份独立审阅合并', () => {
       return acc;
     }, {});
     expect(byStatus.agreement?.length ?? 0).toBeGreaterThan(0);
-    expect(byStatus.duplicate?.length ?? 0).toBeGreaterThan(0);
+    expect(byStatus.duplicate?.map((layer) => layer.layer)).toEqual([MISSING_K]);
     expect(byStatus['content-conflict']?.map((layer) => layer.layer)).toEqual([9]);
     expect(pending.analysis.unresolvedLayers).toEqual([9]);
+    // 共同来源且未改动的层是一致决定，不是重复导入
+    const shared = pending.analysis.layers.find((layer) => layer.layer === 7)!;
+    expect(shared.status).toBe('agreement');
+    expect(shared.reason).toContain('共同来源');
 
     expect(() => useStore.getState().confirmReviewMerge()).not.toThrow();
     expect(useStore.getState().pendingReviewMerge).not.toBeNull();
@@ -156,6 +161,86 @@ describe('两份独立审阅合并', () => {
     expect(state.measurements).toHaveLength(1);
     expect(state.measurements[0].distance).toBe(beforeMergeMeasurements[0].distance);
     expect(state.measurements[0].basisLayers).toEqual([7, 8, 9, 10]);
-    expect(state.lastMerge).toBeNull();
+   expect(state.lastMerge).toBeNull();
+ });
+
+  it('关闭预览与页面后逐层决定保留；可单独撤回一层另选，其他决定与测量复核不受影响', () => {
+   openGapped('草稿 A');
+   measure(8, 11);
+    // 双方以不同文件名独立补入相同内容的缺片：一致决定，不产生冲突
+    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'a/fill.dcm', 210)], 'A 补缺');
+    useStore.getState().confirmPatch();
+   patchConflict('a');
+    // 测量依据完整：先确认补片/替换片影响，再保存审阅分支
+   useStore.getState().confirmMeasurement(useStore.getState().measurements.find((m) => m.review === 'pending')!.id);
+   useStore.getState().saveReviewSide('a', '审阅 A');
+   openGapped('草稿 B');
+   measure(8, 11);
+    useStore.getState().requestPatch([frameForLayer(MISSING_K, 'b/fill.dcm', 210)], 'B 补缺');
+    useStore.getState().confirmPatch();
+   patchConflict('b');
+   useStore.getState().confirmMeasurement(useStore.getState().measurements.find((m) => m.review === 'pending')!.id);
+   useStore.getState().saveReviewSide('b', '审阅 B');
+
+    useStore.getState().requestReviewMerge();
+    useStore.getState().setReviewMergeChoice(9, 'a');
+    // 关闭预览（保留选择）：决定不丢
+    useStore.getState().cancelReviewMerge();
+    useStore.getState().requestReviewMerge();
+    let pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[9]).toBe('a');
+    expect(pending.analysis.unresolvedLayers).toEqual([]);
+
+    // 模拟关闭页面：内存状态清空，仅从 localStorage 恢复
+    const saved = JSON.parse(localStorage.getItem('medical-workstation-v1')!);
+    useStore.setState({
+      doc: saved,
+      volume: null,
+      pendingReviewMerge: null,
+      reviewBranches: saved.reviewBranches,
+      measurements: [],
+      slices: [0, 0, 0],
+      cursorIJK: null,
+    });
+    useStore.getState().requestReviewMerge();
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[9]).toBe('a');
+    expect(pending.analysis.layers.find((layer) => layer.layer === 9)!.selected).toBe('a');
+
+    // 单独撤回第 9 层：其他层的采用决定保持，冲突层回到待定
+    useStore.getState().setReviewMergeChoice(9, null);
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.analysis.unresolvedLayers).toEqual([9]);
+    expect(pending.analysis.layers.find((layer) => layer.layer === 7)!.selected).toBe('a');
+
+    // 另选 B 侧后确认合并
+    useStore.getState().setReviewMergeChoice(9, 'b');
+    useStore.getState().confirmReviewMerge();
+    const merged = useStore.getState().volume!;
+    expect(merged.id).toContain('merge:');
+    expect(merged.sliceManifest?.[9].sourceName).toBe('b/layer-9.dcm');
+    // 合并草稿已清空，来源审阅保持不变
+    expect(useStore.getState().doc.mergeDraft ?? null).toBeNull();
+    expect(useStore.getState().doc.imports[useStore.getState().reviewBranches.a!.id]).toBeDefined();
+    const results = useStore.getState().measurements;
+    expect(results).toHaveLength(2);
+    // A 侧测量依据的第 9 层像素已变 → 待复核；B 侧测量依据完整未变 → 保持确认
+    expect(results.find((m) => m.id.startsWith('a-'))!.review).toBe('pending');
+    expect(results.find((m) => m.id.startsWith('b-'))!.review).toBe('confirmed');
+
+    // 保存后的合并版可独立重开，不需要重新预览
+    const mergedId = merged.id;
+    useStore.setState({ volume: null, measurements: [], slices: [0, 0, 0], cursorIJK: null });
+    restoreLastSession();
+    expect(useStore.getState().volume!.id).toBe(mergedId);
+    expect(useStore.getState().measurements).toHaveLength(2);
   });
 });
+    openGapped('草稿 A');
+    measure(8, 11);
+    patchConflict('a');
+    useStore.getState().saveReviewSide('a', '审阅 A');
+    openGapped('草稿 B');
+    measure(8, 11);
+    patchConflict('b');
+    useStore.getState().saveReviewSide('b', '审阅 B');

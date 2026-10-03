@@ -174,16 +174,19 @@ export function analyzeReviewMerge(
       reason = '仅审阅 B 在此位置补入，A 仍缺片';
       selected = previousChoices[layer] === 'a' ? null : 'b';
     } else if (a!.hash === b!.hash) {
-      const sameProvenance = a!.frame.sourceName === b!.frame.sourceName &&
-        a!.acquisition === b!.acquisition;
-      const independentlyAdopted = a!.acquisition !== b!.acquisition ||
-        a!.sourceName !== b!.sourceName;
-      const duplicate = sameProvenance || (!independentlyAdopted && a!.frame.sourceName === b!.frame.sourceName);
-      status = duplicate && !independentlyAdopted ? 'duplicate' : 'agreement';
+      const sameSource = a!.frame.sourceName === b!.frame.sourceName;
+      const sameAcquisition = a!.acquisition === b!.acquisition;
+      if (sameSource && sameAcquisition) {
+        status = 'agreement';
+        reason = '共同来源且内容未改动，双方决定一致，不产生胜者';
+      } else if (sameSource) {
+        status = 'duplicate';
+        reason = '同一来源切片在不同采集批次被重复导入，内容相同只保留一份，不产生胜者';
+      } else {
+        status = 'agreement';
+        reason = '两份审阅独立决定一致，像素内容相同';
+      }
       selected = previousChoices[layer] === 'b' ? 'b' : 'a';
-      reason = status === 'duplicate'
-        ? '相同补片被重复导入，只保留一份，不产生胜者'
-        : '两份审阅独立决定一致，像素内容相同';
     } else {
       status = 'content-conflict';
       required = true;
