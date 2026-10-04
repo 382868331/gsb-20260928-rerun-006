@@ -74,6 +74,8 @@ interface PersistedDoc {
   reviewBranches?: Partial<Record<ReviewSide, { id: string; label: string }>>;
  // 未完成的合并逐层决定草稿：关闭预览或页面后重开继续，不清空已确认层
   mergeDraft?: { a: string; b: string; choices: Partial<Record<number, ReviewSide | null>> } | null;
+  // 已提交合并的逐层决定：重开预览时作为起点，只需重新处理被撤回的层
+  mergeDecisions?: { a: string; b: string; choices: Partial<Record<number, ReviewSide | null>> } | null;
 }
 
 const STORAGE_KEY = 'medical-workstation-v1';
@@ -502,9 +504,14 @@ export const useStore = create<WorkstationState>((set, get) => {
       const branchVolume: Volume = { ...volume, id: branchId, label };
       const { frames, frameAcquisitions } = framesFromVolume(branchVolume);
       let nextDoc = persistImport(doc, branchVolume, frames, label, branchVolume.window, frameAcquisitions);
+      // 来源审阅被重新保存：旧的合并决定与草稿不再适用，需重新逐层处理
+      const staleMerge = (m: { a: string; b: string } | null | undefined) =>
+        m && (m.a === branchId || m.b === branchId);
       nextDoc = {
         ...nextDoc,
         lastDatasetId: branchId,
+        mergeDraft: staleMerge(nextDoc.mergeDraft) ? null : nextDoc.mergeDraft ?? null,
+        mergeDecisions: staleMerge(nextDoc.mergeDecisions) ? null : nextDoc.mergeDecisions ?? null,
         reviewBranches: { ...(nextDoc.reviewBranches ?? {}), [side]: { id: branchId, label } },
         sessions: {
           ...nextDoc.sessions,
@@ -587,7 +594,11 @@ export const useStore = create<WorkstationState>((set, get) => {
       const draftChoices = draft && draft.a === branchA.id && draft.b === branchB.id
         ? draft.choices
         : {};
-      const previousChoices = pendingReviewMerge?.choices ?? draftChoices;
+      const committed = doc.mergeDecisions;
+      const committedChoices = committed && committed.a === branchA.id && committed.b === branchB.id
+        ? committed.choices
+        : {};
+      const previousChoices = pendingReviewMerge?.choices ?? { ...committedChoices, ...draftChoices };
       const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
       set({
         pendingReviewMerge: { analysis, choices: { ...previousChoices } },
@@ -668,6 +679,8 @@ export const useStore = create<WorkstationState>((set, get) => {
         ...nextDoc,
         lastDatasetId: result.volume.id,
         mergeDraft: null,
+        // 记录已提交的逐层决定：重开合并预览时保留，仅被撤回的层需重新处理
+        mergeDecisions: { a: branchA.id, b: branchB.id, choices: { ...prepared.choices } },
         sessions: { ...nextDoc.sessions, [result.volume.id]: session },
       };
       localStorage.setItem(STORAGE_KEY, JSON.stringify(nextDoc));

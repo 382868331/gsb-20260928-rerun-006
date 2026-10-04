@@ -235,12 +235,71 @@ describe('两份独立审阅合并', () => {
     expect(useStore.getState().volume!.id).toBe(mergedId);
     expect(useStore.getState().measurements).toHaveLength(2);
   });
-});
-    openGapped('草稿 A');
-    measure(8, 11);
-    patchConflict('a');
+  it('提交合并后重开预览保留逐层决定：撤回一层只需重处理该层，来源影像不被覆盖', () => {
+    const conflictAt = (side: 'a' | 'b', k: number) => {
+      useStore.getState().requestPatch(
+        [frameForLayer(k, side + '/layer-' + k + '.dcm', side === 'a' ? 230 : 240)],
+        side + ' 替换第 ' + k + ' 层',
+      );
+      const pendingPatch = useStore.getState().pendingPatch!;
+      useStore.getState().setPatchChoice(pendingPatch.analysis.assessments[0].sourceIndex, true);
+      useStore.getState().confirmPatch();
+    };
+    openGapped('决定 A');
+    conflictAt('a', 4);
+    conflictAt('a', 12);
     useStore.getState().saveReviewSide('a', '审阅 A');
-    openGapped('草稿 B');
-    measure(8, 11);
-    patchConflict('b');
+    openGapped('决定 B');
+    conflictAt('b', 4);
+    conflictAt('b', 12);
     useStore.getState().saveReviewSide('b', '审阅 B');
+
+    const branchAId = useStore.getState().reviewBranches.a!.id;
+    const branchBId = useStore.getState().reviewBranches.b!.id;
+    const importABefore = JSON.stringify(useStore.getState().doc.imports[branchAId]);
+    const importBBefore = JSON.stringify(useStore.getState().doc.imports[branchBId]);
+
+    useStore.getState().requestReviewMerge();
+    expect(useStore.getState().pendingReviewMerge!.analysis.unresolvedLayers).toEqual([4, 12]);
+    useStore.getState().setReviewMergeChoice(4, 'a');
+    useStore.getState().setReviewMergeChoice(12, 'b');
+    useStore.getState().confirmReviewMerge();
+    expect(useStore.getState().volume!.id).toContain('merge:');
+    expect(useStore.getState().volume!.sliceManifest?.[4].sourceName).toBe('a/layer-4.dcm');
+    expect(useStore.getState().volume!.sliceManifest?.[12].sourceName).toBe('b/layer-12.dcm');
+
+    useStore.getState().requestReviewMerge();
+    let pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[4]).toBe('a');
+    expect(pending.choices[12]).toBe('b');
+    expect(pending.analysis.unresolvedLayers).toEqual([]);
+
+    useStore.getState().setReviewMergeChoice(4, null);
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.analysis.unresolvedLayers).toEqual([4]);
+    expect(pending.analysis.layers.find((layer) => layer.layer === 12)!.selected).toBe('b');
+
+    const saved = JSON.parse(localStorage.getItem('medical-workstation-v1')!);
+    useStore.setState({
+      doc: saved,
+      volume: null,
+      pendingReviewMerge: null,
+      reviewBranches: saved.reviewBranches,
+      measurements: [],
+      slices: [0, 0, 0],
+      cursorIJK: null,
+    });
+    useStore.getState().requestReviewMerge();
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[12]).toBe('b');
+    expect(pending.analysis.unresolvedLayers).toEqual([4]);
+    expect(pending.analysis.layers.find((layer) => layer.layer === 12)!.selected).toBe('b');
+
+    useStore.getState().setReviewMergeChoice(4, 'b');
+    useStore.getState().confirmReviewMerge();
+    expect(useStore.getState().volume!.sliceManifest?.[4].sourceName).toBe('b/layer-4.dcm');
+    expect(useStore.getState().volume!.sliceManifest?.[12].sourceName).toBe('b/layer-12.dcm');
+    expect(JSON.stringify(useStore.getState().doc.imports[branchAId])).toBe(importABefore);
+    expect(JSON.stringify(useStore.getState().doc.imports[branchBId])).toBe(importBBefore);
+  });
+});
