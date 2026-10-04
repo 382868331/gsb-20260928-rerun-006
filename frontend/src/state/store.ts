@@ -63,6 +63,8 @@ interface PersistedImport {
   acquisitions?: AcquisitionInfo[];
   decisions?: SliceDecision[];
   mergeSources?: { a: string; b: string };
+  // 合并版本确认时的逐层决定：重开合并预览时恢复，未决层之外的决定不丢
+  mergeChoices?: Partial<Record<number, ReviewSide | null>>;
 }
 
 interface PersistedDoc {
@@ -587,7 +589,11 @@ export const useStore = create<WorkstationState>((set, get) => {
       const draftChoices = draft && draft.a === branchA.id && draft.b === branchB.id
         ? draft.choices
         : {};
-      const previousChoices = pendingReviewMerge?.choices ?? draftChoices;
+      // 已生成过合并版本时，以其确认的逐层决定为基线：重开预览不丢已确认层
+      const mergedChoices = doc.imports[`merge:${branchA.id}|${branchB.id}`]?.mergeChoices ?? {};
+      const previousChoices = pendingReviewMerge?.choices ?? (draft && draft.a === branchA.id && draft.b === branchB.id
+        ? { ...mergedChoices, ...draftChoices }
+        : mergedChoices);
       const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
       set({
         pendingReviewMerge: { analysis, choices: { ...previousChoices } },
@@ -659,6 +665,18 @@ export const useStore = create<WorkstationState>((set, get) => {
       const mergedMeasurements = results.map((item) => item.measurement);
       const { frames, frameAcquisitions } = framesFromVolume(result.volume);
       let nextDoc = persistImport(state.doc, result.volume, frames, mergeLabel, result.volume.window, frameAcquisitions);
+      // 逐层决定随合并版本持久化：重开预览/页面后恢复，来源 A/B 记录不受影响
+      const confirmedChoices: Partial<Record<number, ReviewSide | null>> = {};
+      for (const layer of prepared.analysis.layers) {
+        if (layer.selected !== null) confirmedChoices[layer.layer] = layer.selected;
+      }
+      nextDoc = {
+        ...nextDoc,
+        imports: {
+          ...nextDoc.imports,
+          [result.volume.id]: { ...nextDoc.imports[result.volume.id], mergeChoices: confirmedChoices },
+        },
+      };
       const session: DatasetSession = {
         slices: [0, 0, 0],
         cursorIJK: null,

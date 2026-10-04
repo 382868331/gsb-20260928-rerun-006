@@ -235,12 +235,74 @@ describe('两份独立审阅合并', () => {
     expect(useStore.getState().volume!.id).toBe(mergedId);
     expect(useStore.getState().measurements).toHaveLength(2);
   });
-});
-    openGapped('草稿 A');
-    measure(8, 11);
-    patchConflict('a');
+
+  it('合并后重开预览保留逐层决定：单层改待定不影响其他层，重开页面后仍保持，来源不被覆盖', () => {
+    const patchLayer = (side: 'a' | 'b', k: number, mark: number) => {
+      useStore.getState().requestPatch([frameForLayer(k, `${side}/layer-${k}.dcm`, mark)], `${side} 替换第 ${k} 层`);
+      const pendingPatch = useStore.getState().pendingPatch!;
+      useStore.getState().setPatchChoice(pendingPatch.analysis.assessments[0].sourceIndex, true);
+      useStore.getState().confirmPatch();
+    };
+
+    openGapped('双冲突 A');
+    patchLayer('a', 4, 231);
+    patchLayer('a', 12, 232);
     useStore.getState().saveReviewSide('a', '审阅 A');
-    openGapped('草稿 B');
-    measure(8, 11);
-    patchConflict('b');
+    openGapped('双冲突 B');
+    patchLayer('b', 4, 241);
+    patchLayer('b', 12, 242);
     useStore.getState().saveReviewSide('b', '审阅 B');
+
+    useStore.getState().requestReviewMerge();
+    let pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.analysis.unresolvedLayers).toEqual([4, 12]);
+
+    // 第 4 层采用 A、第 12 层采用 B，生成独立合并版本
+    useStore.getState().setReviewMergeChoice(4, 'a');
+    useStore.getState().setReviewMergeChoice(12, 'b');
+    useStore.getState().confirmReviewMerge();
+    const merged = useStore.getState().volume!;
+    expect(merged.id).toContain('merge:');
+    expect(merged.sliceManifest?.[4].sourceName).toBe('a/layer-4.dcm');
+    expect(merged.sliceManifest?.[12].sourceName).toBe('b/layer-12.dcm');
+
+    // 来源 A/B 影像不被合并版本覆盖
+    const state = useStore.getState();
+    const importA = state.doc.imports[state.reviewBranches.a!.id];
+    const importB = state.doc.imports[state.reviewBranches.b!.id];
+    expect(importA.frames.some((f) => f.sourceName === 'a/layer-4.dcm')).toBe(true);
+    expect(importA.frames.some((f) => f.sourceName === 'b/layer-12.dcm')).toBe(false);
+    expect(importB.frames.some((f) => f.sourceName === 'b/layer-12.dcm')).toBe(true);
+
+    // 再打开合并预览：第 4、12 层决定都在
+    useStore.getState().requestReviewMerge();
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[4]).toBe('a');
+    expect(pending.choices[12]).toBe('b');
+    expect(pending.analysis.unresolvedLayers).toEqual([]);
+
+    // 第 4 层改为待定：只需重新处理第 4 层，第 12 层继续采用 B
+    useStore.getState().setReviewMergeChoice(4, null);
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.analysis.unresolvedLayers).toEqual([4]);
+    expect(pending.analysis.layers.find((layer) => layer.layer === 12)!.selected).toBe('b');
+
+    // 关闭并重开页面：决定保持，仍只有第 4 层待处理
+    const saved = JSON.parse(localStorage.getItem('medical-workstation-v1')!);
+    useStore.setState({
+      doc: saved,
+      volume: null,
+      pendingReviewMerge: null,
+      reviewBranches: saved.reviewBranches,
+      measurements: [],
+      slices: [0, 0, 0],
+      cursorIJK: null,
+    });
+    useStore.getState().requestReviewMerge();
+    pending = useStore.getState().pendingReviewMerge!;
+    expect(pending.choices[4]).toBeNull();
+    expect(pending.choices[12]).toBe('b');
+    expect(pending.analysis.unresolvedLayers).toEqual([4]);
+    expect(pending.analysis.layers.find((layer) => layer.layer === 12)!.selected).toBe('b');
+  });
+});
