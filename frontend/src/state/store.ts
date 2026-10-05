@@ -31,6 +31,13 @@ import {
   type ReviewMergeAnalysis,
   type ReviewSide,
 } from '../core/reviewMerge';
+import {
+  collectIntervals,
+  computeConsistency,
+  proposeCandidate,
+  refreshConsistency,
+  type ConsistencyReview,
+} from '../core/consistency';
 
 export type SliceTriple = [number, number, number];
 
@@ -127,6 +134,8 @@ interface WorkstationState {
   pendingReviewMerge: {
     analysis: ReviewMergeAnalysis;
     choices: Partial<Record<number, ReviewSide | null>>;
+    // 层间一致性辅助审阅：可疑跳变诊断与局部候选调整（候选不改动任何决定）
+    consistency: ConsistencyReview | null;
   } | null;
   reviewBranches: Partial<Record<ReviewSide, { id: string; label: string }>>;
   lastMerge: { volume: Volume; measurements: Measurement[]; doc: PersistedDoc } | null;
@@ -156,6 +165,11 @@ interface WorkstationState {
   openReviewSide: (side: ReviewSide) => void;
   requestReviewMerge: () => void;
   setReviewMergeChoice: (layer: number, side: ReviewSide | null) => void;
+  // 层间一致性辅助审阅：计算可疑跳变区间；候选调整仅明确批准后才进入逐层选择
+  runConsistencyCheck: () => void;
+  proposeConsistencyCandidate: (layer: number) => void;
+  approveConsistencyCandidate: (layer: number) => void;
+  dismissConsistencyCandidate: (layer: number) => void;
   confirmReviewMerge: () => void;
   cancelReviewMerge: () => void;
   undoReviewMerge: () => void;
@@ -596,7 +610,7 @@ export const useStore = create<WorkstationState>((set, get) => {
         : mergedChoices);
       const analysis = analyzeReviewMerge(volumeA, volumeB, previousChoices);
       set({
-        pendingReviewMerge: { analysis, choices: { ...previousChoices } },
+        pendingReviewMerge: { analysis, choices: { ...previousChoices }, consistency: null },
         loadError: null,
       });
     },
@@ -620,11 +634,86 @@ export const useStore = create<WorkstationState>((set, get) => {
       }
       set({
         doc: nextDoc,
-        pendingReviewMerge: { analysis: {
-          ...pending.analysis,
-          layers,
-          unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
-        }, choices },
+        pendingReviewMerge: (() => {
+          // 修改一层仅让其直接邻域的诊断过期；远处已确认层的诊断保持原依据（对象不变）
+          const diagnostics = pending.consistency
+            ? refreshConsistency(pending.consistency.diagnostics, layers, pending.analysis.spacing, layer)
+            : null;
+          return {
+            analysis: {
+              ...pending.analysis,
+              layers,
+              unresolvedLayers: layers.filter((item) => item.required && item.selected === null).map((item) => item.layer),
+            },
+            choices,
+            consistency: diagnostics
+              ? {
+                  diagnostics,
+                  intervals: collectIntervals(diagnostics),
+                  candidates: pending.consistency!.candidates.filter((item) => item.layer !== layer),
+                }
+              : null,
+          };
+        })(),
+      });
+    },
+
+    runConsistencyCheck: () => {
+      const pending = get().pendingReviewMerge;
+      if (!pending) return;
+      const diagnostics = computeConsistency(pending.analysis.layers, pending.analysis.spacing);
+      set({
+        pendingReviewMerge: {
+          ...pending,
+          consistency: { diagnostics, intervals: collectIntervals(diagnostics), candidates: [] },
+        },
+      });
+    },
+
+    proposeConsistencyCandidate: (layer) => {
+      const pending = get().pendingReviewMerge;
+      if (!pending?.consistency) return;
+      // 代价需要统计两侧审阅中依据该层的测量
+      const measurementLayers: number[][] = [];
+      const { doc, reviewBranches } = get();
+      for (const side of ['a', 'b'] as const) {
+        const id = reviewBranches[side]?.id;
+        const session = id ? doc.sessions[id] : undefined;
+        for (const m of session?.measurements ?? []) measurementLayers.push(m.basisLayers ?? []);
+      }
+      const candidate = proposeCandidate(pending.analysis.layers, layer, measurementLayers);
+      if (!candidate) return;
+      const candidates = [
+        ...pending.consistency.candidates.filter((item) => item.layer !== layer),
+        candidate,
+      ];
+      set({
+        pendingReviewMerge: {
+          ...pending,
+          consistency: { ...pending.consistency, candidates },
+        },
+      });
+    },
+
+    approveConsistencyCandidate: (layer) => {
+      const pending = get().pendingReviewMerge;
+      const candidate = pending?.consistency?.candidates.find((item) => item.layer === layer);
+      if (!candidate) return;
+      // 只有明确批准的层才进入逐层选择；邻域诊断随之过期，远处保持
+      get().setReviewMergeChoice(layer, candidate.to);
+    },
+
+    dismissConsistencyCandidate: (layer) => {
+      const pending = get().pendingReviewMerge;
+      if (!pending?.consistency) return;
+      set({
+        pendingReviewMerge: {
+          ...pending,
+          consistency: {
+            ...pending.consistency,
+            candidates: pending.consistency.candidates.filter((item) => item.layer !== layer),
+          },
+        },
       });
     },
 

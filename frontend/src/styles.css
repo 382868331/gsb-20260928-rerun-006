@@ -239,3 +239,35 @@ button.active { background: #1f6feb; border-color: #1f6feb; }
 .decisions { margin-top: 10px; font-size: 12px; }
 .decisions summary { cursor: pointer; color: #9fd0ff; }
 .decisions ul { margin: 6px 0 0 16px; padding: 0; max-height: 160px; overflow-y: auto; }
+.consistency-panel {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid #2c3a4a;
+  border-radius: 6px;
+}
+
+.consistency-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.consistency-head h3 {
+  margin: 0;
+}
+
+.consistency-intervals {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.consistency-candidates {
+  margin-top: 6px;
+}
+
+.small-btn {
+  margin-left: 8px;
+  font-size: 12px;
+  padding: 2px 6px;
+}

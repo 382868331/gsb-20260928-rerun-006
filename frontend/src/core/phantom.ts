@@ -11,6 +11,8 @@ export interface PhantomDef {
   layerDir: Vec3;
   origin: Vec3;
   markerIjk: [number, number, number];
+  // 体模形状：亮壳包暗腔（默认）/ 连续渐变形 / 层间突变台；均为无患者标识的人工数据
+  shape?: 'shell' | 'taper' | 'step';
 }
 
 export const PHANTOM_CATALOG: PhantomDef[] = [
@@ -22,6 +24,26 @@ export const PHANTOM_CATALOG: PhantomDef[] = [
     layerDir: [0, 0, -1],
     origin: [-14.4, -8.0, 40.0],
     markerIjk: [18, 5, 12],
+  },
+  {
+    key: 'taper-even',
+    label: '连续渐变形·细层间距',
+    dimensions: [20, 18, 14],
+    spacing: [1.0, 1.0, 1.5],
+    layerDir: [0, 0, 1],
+    origin: [-10.0, -9.0, 0.0],
+    markerIjk: [10, 9, 7],
+    shape: 'taper',
+  },
+  {
+    key: 'step-wide',
+    label: '突变台形·宽层间距',
+    dimensions: [20, 18, 12],
+    spacing: [1.0, 1.0, 4.0],
+    layerDir: [0, 0, 1],
+    origin: [-10.0, -9.0, 0.0],
+    markerIjk: [10, 9, 3],
+    shape: 'step',
   },
 ];
 
@@ -49,12 +71,24 @@ export function createAnalyticVolume(def: PhantomDef): Volume {
   for (let k = 0; k < nz; k += 1) {
     for (let j = 0; j < ny; j += 1) {
       for (let i = 0; i < nx; i += 1) {
-        const d2 =
-          ((i - cx) / rx) ** 2 +
-          ((j - cy) / ry) ** 2 +
-          ((k - cz) / rz) ** 2;
         let v = 0;
-        if (d2 < 1) v = d2 > 0.55 ? 200 : 20; // 亮壳 + 暗空腔
+        const shape = def.shape ?? 'shell';
+        if (shape === 'shell') {
+          const d2 =
+            ((i - cx) / rx) ** 2 +
+            ((j - cy) / ry) ** 2 +
+            ((k - cz) / rz) ** 2;
+          if (d2 < 1) v = d2 > 0.55 ? 200 : 20; // 亮壳 + 暗空腔
+        } else {
+          // 截面半径沿 k 连续渐变（taper）或在半途突变（step），用于层间一致性检验
+          const frac = shape === 'taper'
+            ? 0.35 + 0.6 * Math.sin((Math.PI * (k + 0.5)) / nz)
+            : k < nz / 2
+              ? 0.9
+              : 0.4;
+          const d2 = ((i - cx) / (rx * frac)) ** 2 + ((j - cy) / (ry * frac)) ** 2;
+          if (d2 < 1) v = 180;
+        }
         const md = Math.sqrt((i - mx) ** 2 + (j - my) ** 2 + (k - mz) ** 2);
         if (md <= 1.2) v = 255; // 标记点（小球，便于三视图定位同一点）
         data[i + j * nx + k * nx * ny] = v;

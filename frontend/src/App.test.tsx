@@ -23,7 +23,7 @@ describe('应用集成', () => {
     expect(screen.queryByText(/轴向 Axial/)).toBeNull();
 
     act(() => {
-      fireEvent.click(screen.getByText(/打开：/));
+      fireEvent.click(screen.getByText(/打开：空腔/));
     });
     expect(screen.getAllByText(/Axial/).length).toBeGreaterThan(0);
     expect(screen.getByText('冠状 Coronal')).toBeTruthy();
@@ -47,7 +47,7 @@ describe('应用集成', () => {
   it('乱序导入先显示空间排列预览，确认后才替换；混合冲突逐条说明且不替换', () => {
     render(<App />);
     act(() => {
-      fireEvent.click(screen.getByText(/打开：/));
+      fireEvent.click(screen.getByText(/打开：空腔/));
     });
     expect(screen.getAllByText(/空腔·翻转层序·不等间距/).length).toBeGreaterThan(0);
 
@@ -85,7 +85,7 @@ describe('应用集成', () => {
   it('补片预览逐帧列出分类，确认后缺片被填补且可撤销', () => {
     render(<App />);
     act(() => {
-      fireEvent.click(screen.getByText(/打开：/));
+      fireEvent.click(screen.getByText(/打开：空腔/));
     });
     // 先载入缺片序列
     act(() => {
@@ -117,7 +117,7 @@ describe('应用集成', () => {
   it('混合补片包预览列出替换候选与冲突帧，拒绝则不改动', () => {
     render(<App />);
     act(() => {
-      fireEvent.click(screen.getByText(/打开：/));
+      fireEvent.click(screen.getByText(/打开：空腔/));
     });
     act(() => {
       fireEvent.click(screen.getByText('接收混合补片包'));
